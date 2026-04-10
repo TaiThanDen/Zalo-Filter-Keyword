@@ -15,7 +15,8 @@
     "worker": "tsx scripts/worker.ts",
     "watcher": "tsx scripts/watcher.ts",
     "watcher:mock": "tsx scripts/watcher.ts --mode=mock",
-    "bootstrap-admin": "tsx scripts/bootstrap-admin.ts"
+    "bootstrap-admin": "tsx scripts/bootstrap-admin.ts",
+    "groups:import": "tsx scripts/import-zalo-groups.ts"
   },
   "dependencies": {
     "@prisma/client": "^6.16.0",

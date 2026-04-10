@@ -1,4 +1,4 @@
-import { cookies } from "next/headers";
+﻿import { cookies } from "next/headers";
 import { AppError } from "@/src/lib/errors";
 import { verifyPassword } from "@/src/lib/crypto";
 import { IMPLEMENTATION_DEFAULTS } from "@/src/config/constants";
@@ -18,13 +18,13 @@ export async function loginWithPassword(input: { email: string; password: string
   const user = await authRepository.findUserByEmail(input.email);
 
   if (!user || !user.isActive) {
-    throw new AppError("INVALID_CREDENTIALS", "Invalid email or password", 401);
+    throw new AppError("INVALID_CREDENTIALS", "Email hoặc mật khẩu không đúng", 401);
   }
 
   const passwordMatches = await verifyPassword(input.password, user.passwordHash);
 
   if (!passwordMatches) {
-    throw new AppError("INVALID_CREDENTIALS", "Invalid email or password", 401);
+    throw new AppError("INVALID_CREDENTIALS", "Email hoặc mật khẩu không đúng", 401);
   }
 
   const session = await createSessionRecord(user.id, IMPLEMENTATION_DEFAULTS.sessionTtlMs);
@@ -80,3 +80,4 @@ export async function getCurrentUserFromRequestCookie() {
   const cookieStore = await cookies();
   return cookieStore.getAll();
 }
+

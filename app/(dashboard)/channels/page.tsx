@@ -1,4 +1,4 @@
-import { revalidatePath } from "next/cache";
+﻿import { revalidatePath } from "next/cache";
 import { createNotificationChannel, listNotificationChannels, updateNotificationChannel } from "@/src/modules/notifications/notifications.service";
 import { StatusBadge } from "@/src/components/ui/status-badge";
 
@@ -37,16 +37,16 @@ export default async function ChannelsPage() {
   return (
     <div className="space-y-8">
       <section className="space-y-3">
-        <h2 className="text-3xl font-semibold tracking-tight">Channels</h2>
+        <h2 className="text-3xl font-semibold tracking-tight">Kênh thông báo</h2>
         <p className="max-w-3xl text-sm leading-6 text-[var(--color-muted)]">
-          Configure Telegram notification_channel records used by the DB-backed notification_delivery queue.
+          Cấu hình các notification_channel Telegram được worker dùng để gửi notification_delivery từ hàng đợi trong database.
         </p>
       </section>
 
       <section className="card rounded-[1.6rem] p-6">
-        <h3 className="text-lg font-semibold">Create Telegram channel</h3>
+        <h3 className="text-lg font-semibold">Tạo kênh Telegram</h3>
         <form action={createChannelAction} className="mt-4 grid gap-3 md:grid-cols-2">
-          <input className="field" name="name" placeholder="Main Telegram Alert" required />
+          <input className="field" name="name" placeholder="Telegram cảnh báo chính" required />
           <input className="field" name="botToken" placeholder="Bot token" required />
           <input className="field" name="chatId" placeholder="Chat ID" required />
           <select className="field" name="parseMode" defaultValue="HTML">
@@ -54,31 +54,31 @@ export default async function ChannelsPage() {
             <option value="MarkdownV2">MarkdownV2</option>
           </select>
           <label className="inline-flex items-center gap-2 text-sm font-medium text-[var(--color-muted)] md:col-span-2">
-            <input type="checkbox" name="isActive" defaultChecked /> Active channel
+            <input type="checkbox" name="isActive" defaultChecked /> Kích hoạt kênh
           </label>
           <div className="md:col-span-2">
-            <button type="submit" className="btn btn-primary">Create Channel</button>
+            <button type="submit" className="btn btn-primary">Tạo kênh</button>
           </div>
         </form>
       </section>
 
       <section className="panel rounded-[1.6rem] p-4">
         <div className="table-wrap">
-          <table>
+          <table className="dashboard-table">
             <thead>
               <tr>
-                <th>Name</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>Config</th>
-                <th>Actions</th>
+                <th>Tên</th>
+                <th>Loại</th>
+                <th>Trạng thái</th>
+                <th>Cấu hình</th>
+                <th>Cập nhật lúc</th>
               </tr>
             </thead>
             <tbody>
               {channels.length === 0 ? (
                 <tr>
                   <td colSpan={5} className="py-10 text-center text-sm text-[var(--color-muted)]">
-                    No channels configured yet.
+                    Chưa có kênh nào được cấu hình.
                   </td>
                 </tr>
               ) : (
@@ -91,7 +91,7 @@ export default async function ChannelsPage() {
 
                   return (
                     <tr key={channel.id}>
-                      <td>
+                      <td data-label="Tên" >
                         <form action={updateChannelAction} className="grid gap-2">
                           <input type="hidden" name="id" value={channel.id} />
                           <input className="field" name="name" defaultValue={channel.name} />
@@ -102,21 +102,21 @@ export default async function ChannelsPage() {
                             <option value="MarkdownV2">MarkdownV2</option>
                           </select>
                           <label className="inline-flex items-center gap-2 text-sm text-[var(--color-muted)]">
-                            <input type="checkbox" name="isActive" defaultChecked={channel.isActive} /> Active
+                            <input type="checkbox" name="isActive" defaultChecked={channel.isActive} /> Kích hoạt
                           </label>
-                          <button type="submit" className="btn btn-secondary">Save Channel</button>
+                          <button type="submit" className="btn btn-secondary">Lưu kênh</button>
                         </form>
                       </td>
-                      <td>{channel.type}</td>
-                      <td><StatusBadge value={channel.isActive ? "active" : "inactive"} /></td>
-                      <td>
+                      <td data-label="Loại">{channel.type}</td>
+                      <td data-label="Trạng thái"><StatusBadge value={channel.isActive ? "active" : "inactive"} /></td>
+                      <td data-label="Cấu hình">
                         <div className="space-y-1 text-sm text-[var(--color-muted)]">
-                          <div>Bot: {config.botToken ? "configured" : "missing"}</div>
+                          <div>Bot: {config.botToken ? "đã cấu hình" : "chưa có"}</div>
                           <div>Chat: {config.chatId ?? "-"}</div>
                           <div>Parse mode: {config.parseMode ?? "HTML"}</div>
                         </div>
                       </td>
-                      <td>{new Date(channel.updatedAt).toLocaleString()}</td>
+                      <td data-label="Cập nhật lúc">{new Date(channel.updatedAt).toLocaleString("vi-VN")}</td>
                     </tr>
                   );
                 })

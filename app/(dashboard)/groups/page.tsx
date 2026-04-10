@@ -1,4 +1,4 @@
-import { revalidatePath } from "next/cache";
+﻿import { revalidatePath } from "next/cache";
 import { listWatchers } from "@/src/modules/watchers/watchers.service";
 import { listRules } from "@/src/modules/rules/rules.service";
 import { createGroup, deleteGroup, listGroups, replaceGroupRules, updateGroup } from "@/src/modules/groups/groups.service";
@@ -59,23 +59,23 @@ export default async function GroupsPage() {
   return (
     <div className="space-y-8">
       <section className="space-y-3">
-        <h2 className="text-3xl font-semibold tracking-tight">Groups</h2>
+        <h2 className="text-3xl font-semibold tracking-tight">Nhóm</h2>
         <p className="max-w-3xl text-sm leading-6 text-[var(--color-muted)]">
-          Create monitored groups, toggle them on or off, assign watchers, and map include/exclude rules.
+          Tạo nhóm theo dõi, bật hoặc tắt từng nhóm, gán watcher và gắn các luật include hoặc exclude cho đúng nguồn tin cần lọc.
         </p>
       </section>
 
       <section className="card grid gap-4 rounded-[1.6rem] p-6 lg:grid-cols-[1.2fr_0.8fr]">
         <div>
-          <h3 className="text-lg font-semibold">Create group</h3>
-          <p className="mt-2 text-sm text-[var(--color-muted)]">Canonical domain stays as group across UI, API, and schema.</p>
+          <h3 className="text-lg font-semibold">Tạo nhóm mới</h3>
+          <p className="mt-2 text-sm text-[var(--color-muted)]">Canonical domain vẫn là group trong UI, API và schema, nhưng nhãn hiển thị đã được Việt hóa.</p>
         </div>
         <form action={createGroupAction} className="grid gap-3">
           <input type="hidden" name="source" value="zalo" />
-          <input className="field" name="name" placeholder="Sales Group" required />
-          <input className="field" name="externalId" placeholder="123456" required />
+          <input className="field" name="name" placeholder="Cộng đồng PG PB SUP HCM" required />
+          <input className="field" name="externalId" placeholder="g3551797143992062788" required />
           <select className="field" name="watcherId" defaultValue="">
-            <option value="">Unassigned</option>
+            <option value="">Chưa gán watcher</option>
             {watchers.map((watcher) => (
               <option key={watcher.id} value={watcher.id}>
                 {watcher.name}
@@ -83,59 +83,59 @@ export default async function GroupsPage() {
             ))}
           </select>
           <label className="inline-flex items-center gap-2 text-sm font-medium text-[var(--color-muted)]">
-            <input type="checkbox" name="isEnabled" defaultChecked /> Enabled
+            <input type="checkbox" name="isEnabled" defaultChecked /> Bật nhóm
           </label>
-          <button type="submit" className="btn btn-primary">Create Group</button>
+          <button type="submit" className="btn btn-primary">Tạo nhóm</button>
         </form>
       </section>
 
       <section className="panel rounded-[1.6rem] p-4">
         <div className="table-wrap">
-          <table>
+          <table className="dashboard-table">
             <thead>
               <tr>
-                <th>Group</th>
-                <th>Source</th>
+                <th>Nhóm</th>
+                <th>Nguồn</th>
                 <th>External ID</th>
-                <th>Enabled</th>
+                <th>Trạng thái</th>
                 <th>Watcher</th>
-                <th>Rules</th>
-                <th>Actions</th>
+                <th>Luật</th>
+                <th>Thao tác</th>
               </tr>
             </thead>
             <tbody>
               {groupsData.items.length === 0 ? (
                 <tr>
                   <td colSpan={7} className="py-10 text-center text-sm text-[var(--color-muted)]">
-                    No groups configured yet.
+                    Chưa có nhóm nào được cấu hình.
                   </td>
                 </tr>
               ) : (
                 groupsData.items.map((group) => (
                   <tr key={group.id}>
-                    <td>
+                    <td data-label="Nhóm">
                       <form action={updateGroupAction} className="grid gap-2">
                         <input type="hidden" name="id" value={group.id} />
                         <input className="field" name="name" defaultValue={group.name} />
                         <label className="inline-flex items-center gap-2 text-sm text-[var(--color-muted)]">
-                          <input type="checkbox" name="isEnabled" defaultChecked={group.isEnabled} /> Enabled
+                          <input type="checkbox" name="isEnabled" defaultChecked={group.isEnabled} /> Bật nhóm
                         </label>
                         <select className="field" name="watcherId" defaultValue={group.watcherId ?? ""}>
-                          <option value="">Unassigned</option>
+                          <option value="">Chưa gán watcher</option>
                           {watchers.map((watcher) => (
                             <option key={watcher.id} value={watcher.id}>
                               {watcher.name}
                             </option>
                           ))}
                         </select>
-                        <button type="submit" className="btn btn-secondary">Save Group</button>
+                        <button type="submit" className="btn btn-secondary">Lưu nhóm</button>
                       </form>
                     </td>
-                    <td>{group.source}</td>
-                    <td><code>{group.externalId}</code></td>
-                    <td><StatusBadge value={group.isEnabled ? "enabled" : "disabled"} /></td>
-                    <td>{group.watcher?.name ?? "Unassigned"}</td>
-                    <td>
+                    <td data-label="Nguồn">{group.source}</td>
+                    <td data-label="External ID"><code>{group.externalId}</code></td>
+                    <td data-label="Trạng thái"><StatusBadge value={group.isEnabled ? "enabled" : "disabled"} /></td>
+                    <td data-label="Watcher">{group.watcher?.name ?? "Chưa gán"}</td>
+                    <td data-label="Luật">
                       <form action={replaceRulesAction} className="grid gap-2">
                         <input type="hidden" name="groupId" value={group.id} />
                         <select className="field min-h-40" name="ruleIds" multiple defaultValue={group.groupRules.map((item) => item.ruleId)}>
@@ -145,13 +145,13 @@ export default async function GroupsPage() {
                             </option>
                           ))}
                         </select>
-                        <button type="submit" className="btn btn-secondary">Save Rules</button>
+                        <button type="submit" className="btn btn-secondary">Lưu luật</button>
                       </form>
                     </td>
-                    <td>
+                    <td data-label="Thao tác">
                       <form action={deleteGroupAction}>
                         <input type="hidden" name="id" value={group.id} />
-                        <button type="submit" className="btn btn-secondary">Delete</button>
+                        <button type="submit" className="btn btn-secondary">Xóa</button>
                       </form>
                     </td>
                   </tr>

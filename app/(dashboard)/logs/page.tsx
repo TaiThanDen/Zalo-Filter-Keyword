@@ -1,4 +1,4 @@
-import Link from "next/link";
+﻿import Link from "next/link";
 import { StatusBadge } from "@/src/components/ui/status-badge";
 import { getLogDetail, listLogs } from "@/src/modules/logs/logs.service";
 
@@ -27,59 +27,59 @@ export default async function LogsPage({
     <div className="grid gap-6 xl:grid-cols-[1.25fr_0.75fr]">
       <section className="space-y-4">
         <div className="space-y-3">
-          <h2 className="text-3xl font-semibold tracking-tight">Logs</h2>
+          <h2 className="text-3xl font-semibold tracking-tight">Nhật ký</h2>
           <p className="max-w-3xl text-sm leading-6 text-[var(--color-muted)]">
-            Review inbound_message records, match_log decisions, normalized text, reason, and notification_delivery state.
+            Xem inbound_message, quyết định match_log, normalized text, lý do loại hoặc khớp, và trạng thái notification_delivery.
           </p>
         </div>
 
         <form className="card grid gap-3 rounded-[1.6rem] p-5 md:grid-cols-[1fr_auto_auto]">
-          <input className="field" name="search" defaultValue={params.search ?? ""} placeholder="Search message or sender" />
+          <input className="field" name="search" defaultValue={params.search ?? ""} placeholder="Tìm theo nội dung, người gửi hoặc nhóm" />
           <select className="field" name="decision" defaultValue={params.decision ?? ""}>
-            <option value="">All decisions</option>
-            <option value="MATCHED">MATCHED</option>
-            <option value="REJECTED_NO_INCLUDE">REJECTED_NO_INCLUDE</option>
-            <option value="REJECTED_BY_EXCLUDE">REJECTED_BY_EXCLUDE</option>
-            <option value="REJECTED_GROUP_DISABLED">REJECTED_GROUP_DISABLED</option>
-            <option value="REJECTED_DUPLICATE">REJECTED_DUPLICATE</option>
-            <option value="REJECTED_UNKNOWN_GROUP">REJECTED_UNKNOWN_GROUP</option>
+            <option value="">Tất cả quyết định</option>
+            <option value="MATCHED">Khớp</option>
+            <option value="REJECTED_NO_INCLUDE">Không trúng include</option>
+            <option value="REJECTED_BY_EXCLUDE">Bị exclude</option>
+            <option value="REJECTED_GROUP_DISABLED">Nhóm đang tắt</option>
+            <option value="REJECTED_DUPLICATE">Trùng lặp</option>
+            <option value="REJECTED_UNKNOWN_GROUP">Nhóm chưa cấu hình</option>
           </select>
-          <button type="submit" className="btn btn-secondary">Filter</button>
+          <button type="submit" className="btn btn-secondary">Lọc</button>
         </form>
 
         <section className="panel rounded-[1.6rem] p-4">
           <div className="table-wrap">
-            <table>
+            <table className="dashboard-table">
               <thead>
                 <tr>
-                  <th>Time</th>
-                  <th>Group</th>
-                  <th>Sender</th>
-                  <th>Decision</th>
-                  <th>Deliveries</th>
-                  <th>Open</th>
+                  <th>Thời gian</th>
+                  <th>Nhóm</th>
+                  <th>Người gửi</th>
+                  <th>Quyết định</th>
+                  <th>Gửi thông báo</th>
+                  <th>Mở</th>
                 </tr>
               </thead>
               <tbody>
                 {logs.items.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-10 text-center text-sm text-[var(--color-muted)]">No logs yet.</td>
+                    <td colSpan={6} className="py-10 text-center text-sm text-[var(--color-muted)]">Chưa có nhật ký nào.</td>
                   </tr>
                 ) : (
                   logs.items.map((log) => (
                     <tr key={log.id}>
-                      <td>{new Date(log.messageTime).toLocaleString()}</td>
-                      <td>
+                      <td data-label="Thời gian">{new Date(log.messageTime).toLocaleString("vi-VN")}</td>
+                      <td data-label="Nhóm">
                         <div className="space-y-1">
                           <div className="font-semibold">{log.groupName}</div>
                           <div className="text-sm text-[var(--color-muted)] line-clamp-2">{log.messageText}</div>
                         </div>
                       </td>
-                      <td>{log.senderName}</td>
-                      <td><StatusBadge value={log.decision} /></td>
-                      <td><StatusBadge value={log.notificationStatus} /></td>
-                      <td>
-                        <Link className="btn btn-secondary" href={`/logs?id=${log.id}`}>View</Link>
+                      <td data-label="Người gửi">{log.senderName}</td>
+                      <td data-label="Quyết định"><StatusBadge value={log.decision} /></td>
+                      <td data-label="Gửi thông báo"><StatusBadge value={log.notificationStatus} /></td>
+                      <td data-label="Mở chi tiết">
+                        <Link className="btn btn-secondary" href={`/logs?id=${log.id}`}>Xem</Link>
                       </td>
                     </tr>
                   ))
@@ -91,21 +91,21 @@ export default async function LogsPage({
       </section>
 
       <aside className="card rounded-[1.6rem] p-6">
-        <h3 className="text-lg font-semibold">Log detail</h3>
+        <h3 className="text-lg font-semibold">Chi tiết nhật ký</h3>
         {!detail ? (
-          <p className="mt-4 text-sm leading-6 text-[var(--color-muted)]">Select a log to inspect raw payload, fingerprint, matched rules, and delivery attempts.</p>
+          <p className="mt-4 text-sm leading-6 text-[var(--color-muted)]">Chọn một log để xem payload gốc, fingerprint, luật đã khớp và lịch sử gửi thông báo.</p>
         ) : (
           <div className="mt-4 space-y-4 text-sm">
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Decision</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Quyết định</div>
               <div className="mt-1"><StatusBadge value={detail.decision} /></div>
             </div>
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Reason</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Lý do</div>
               <div className="mt-1">{detail.reason ?? "-"}</div>
             </div>
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Normalized Text</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Normalized text</div>
               <pre className="mt-1 overflow-x-auto rounded-2xl bg-stone-100 p-3">{detail.inboundMessage.normalizedText}</pre>
             </div>
             <div>
@@ -113,19 +113,19 @@ export default async function LogsPage({
               <pre className="mt-1 overflow-x-auto rounded-2xl bg-stone-100 p-3">{detail.inboundMessage.fingerprint}</pre>
             </div>
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Matched Include</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Luật include đã khớp</div>
               <pre className="mt-1 overflow-x-auto rounded-2xl bg-stone-100 p-3">{JSON.stringify(detail.matchedIncludeRules, null, 2)}</pre>
             </div>
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Matched Exclude</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Luật exclude đã khớp</div>
               <pre className="mt-1 overflow-x-auto rounded-2xl bg-stone-100 p-3">{JSON.stringify(detail.matchedExcludeRules, null, 2)}</pre>
             </div>
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Raw Payload</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Payload gốc</div>
               <pre className="mt-1 max-h-64 overflow-auto rounded-2xl bg-stone-100 p-3">{JSON.stringify(detail.inboundMessage.rawPayload, null, 2)}</pre>
             </div>
             <div>
-              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Notification Deliveries</div>
+              <div className="text-xs font-semibold uppercase tracking-[0.14em] text-[var(--color-muted)]">Notification deliveries</div>
               <pre className="mt-1 max-h-64 overflow-auto rounded-2xl bg-stone-100 p-3">{JSON.stringify(detail.notificationDeliveries, null, 2)}</pre>
             </div>
           </div>

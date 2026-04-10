@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useRouter } from "next/navigation";
 import { useState, useTransition } from "react";
@@ -25,7 +25,7 @@ export function LoginForm() {
 
       if (!response.ok) {
         const body = (await response.json().catch(() => null)) as { message?: string } | null;
-        setError(body?.message ?? "Login failed");
+        setError(body?.message ?? "Đăng nhập thất bại");
         return;
       }
 
@@ -45,7 +45,7 @@ export function LoginForm() {
 
       <div className="flex flex-col gap-2">
         <label htmlFor="password" className="text-sm font-semibold text-[var(--color-muted)]">
-          Password
+          Mật khẩu
         </label>
         <input id="password" name="password" type="password" className="field" required />
       </div>
@@ -55,7 +55,7 @@ export function LoginForm() {
       ) : null}
 
       <button type="submit" className="btn btn-primary" disabled={pending}>
-        {pending ? "Signing in..." : "Sign In"}
+        {pending ? "Đang đăng nhập..." : "Đăng nhập"}
       </button>
     </form>
   );

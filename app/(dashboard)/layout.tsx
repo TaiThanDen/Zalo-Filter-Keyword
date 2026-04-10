@@ -1,16 +1,16 @@
-import Link from "next/link";
+﻿import Link from "next/link";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { ROUTES } from "@/src/config/constants";
 import { getCurrentUser, logoutCurrentUser } from "@/src/modules/auth/auth.service";
 
 const navigation = [
-  { href: ROUTES.dashboard, label: "Dashboard" },
-  { href: ROUTES.groups, label: "Groups" },
-  { href: ROUTES.rules, label: "Rules" },
-  { href: ROUTES.channels, label: "Channels" },
-  { href: ROUTES.logs, label: "Logs" },
-  { href: ROUTES.watchers, label: "Watchers" },
+  { href: ROUTES.dashboard, label: "Tổng quan" },
+  { href: ROUTES.groups, label: "Nhóm" },
+  { href: ROUTES.rules, label: "Luật" },
+  { href: ROUTES.channels, label: "Kênh báo tin" },
+  { href: ROUTES.logs, label: "Nhật ký" },
+  { href: ROUTES.watchers, label: "Watcher" },
 ];
 
 export default async function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -29,26 +29,22 @@ export default async function DashboardLayout({ children }: { children: React.Re
 
   return (
     <div className="page-shell">
-      <aside className="border-r border-[var(--color-border)] bg-[#fff6ea]/80 px-6 py-8 backdrop-blur-sm">
-        <div className="mb-8 space-y-3">
+      <aside className="page-sidebar border-r border-[var(--color-border)] bg-[#fff6ea]/85 px-5 py-6 backdrop-blur-sm md:px-6 md:py-8">
+        <div className="mb-6 space-y-3 md:mb-8">
           <div className="inline-flex rounded-full bg-[var(--color-accent-soft)] px-3 py-1 text-xs font-semibold uppercase tracking-[0.16em] text-[var(--color-accent)]">
-            Control Plane
+            Bảng điều khiển
           </div>
           <div>
-            <h1 className="text-2xl font-semibold tracking-tight">Zalo Alert</h1>
+            <h1 className="text-2xl font-semibold tracking-tight">Quản trị cảnh báo Zalo</h1>
             <p className="mt-2 text-sm leading-6 text-[var(--color-muted)]">
-              Monitor message events, evaluate rules, and track notification delivery.
+              Quản lý nhóm theo dõi, luật lọc, kênh gửi thông báo, nhật ký và trạng thái watcher trong một nơi.
             </p>
           </div>
         </div>
 
-        <nav className="flex flex-col gap-2">
+        <nav className="page-nav">
           {navigation.map((item) => (
-            <Link
-              key={item.href}
-              href={item.href}
-              className="rounded-2xl px-4 py-3 text-sm font-semibold text-[var(--color-text)] transition hover:bg-[var(--color-accent-soft)]"
-            >
+            <Link key={item.href} href={item.href} className="page-nav-link">
               {item.label}
             </Link>
           ))}
@@ -56,20 +52,20 @@ export default async function DashboardLayout({ children }: { children: React.Re
       </aside>
 
       <div className="min-w-0">
-        <header className="flex flex-wrap items-center justify-between gap-4 border-b border-[var(--color-border)] px-6 py-5">
+        <header className="page-header border-b border-[var(--color-border)] px-5 py-4 md:px-6 md:py-5">
           <div>
-            <p className="text-sm font-semibold text-[var(--color-muted)]">Signed in as</p>
-            <p className="text-base font-semibold">{user.email}</p>
+            <p className="text-sm font-semibold text-[var(--color-muted)]">Đăng nhập với tài khoản</p>
+            <p className="text-base font-semibold break-all">{user.email}</p>
           </div>
 
           <form action={logoutAction}>
             <button type="submit" className="btn btn-secondary">
-              Logout
+              Đăng xuất
             </button>
           </form>
         </header>
 
-        <main className="px-6 py-6">{children}</main>
+        <main className="px-4 py-5 md:px-6 md:py-6">{children}</main>
       </div>
     </div>
   );
