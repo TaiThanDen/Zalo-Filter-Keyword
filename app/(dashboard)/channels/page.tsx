@@ -1,38 +1,9 @@
-﻿import { revalidatePath } from "next/cache";
-import { createNotificationChannel, listNotificationChannels, updateNotificationChannel } from "@/src/modules/notifications/notifications.service";
+﻿import { listNotificationChannels } from "@/src/modules/notifications/notifications.service";
 import { StatusBadge } from "@/src/components/ui/status-badge";
+import { JsonActionForm } from "@/src/components/forms/json-action-form";
 
 export default async function ChannelsPage() {
   const channels = await listNotificationChannels();
-
-  async function createChannelAction(formData: FormData) {
-    "use server";
-    await createNotificationChannel({
-      type: "TELEGRAM",
-      name: String(formData.get("name") || ""),
-      isActive: formData.get("isActive") === "on",
-      config: {
-        botToken: String(formData.get("botToken") || ""),
-        chatId: String(formData.get("chatId") || ""),
-        parseMode: formData.get("parseMode") ? String(formData.get("parseMode")) : undefined,
-      },
-    });
-    revalidatePath("/channels");
-  }
-
-  async function updateChannelAction(formData: FormData) {
-    "use server";
-    await updateNotificationChannel(String(formData.get("id")), {
-      name: String(formData.get("name") || ""),
-      isActive: formData.get("isActive") === "on",
-      config: {
-        botToken: String(formData.get("botToken") || ""),
-        chatId: String(formData.get("chatId") || ""),
-        parseMode: formData.get("parseMode") ? String(formData.get("parseMode")) : undefined,
-      },
-    });
-    revalidatePath("/channels");
-  }
 
   return (
     <div className="space-y-8">
@@ -45,7 +16,15 @@ export default async function ChannelsPage() {
 
       <section className="card rounded-[1.6rem] p-6">
         <h3 className="text-lg font-semibold">Tạo kênh Telegram</h3>
-        <form action={createChannelAction} className="mt-4 grid gap-3 md:grid-cols-2">
+        <JsonActionForm
+          endpoint="/api/channels"
+          method="POST"
+          successMessage="Tạo kênh thông báo thành công"
+          errorMessage="Không thể tạo kênh thông báo"
+          className="mt-4 grid gap-3 md:grid-cols-2"
+          booleanFields={["isActive"]}
+          resetOnSuccess
+        >
           <input className="field" name="name" placeholder="Telegram cảnh báo chính" required />
           <input className="field" name="botToken" placeholder="Bot token" required />
           <input className="field" name="chatId" placeholder="Chat ID" required />
@@ -59,7 +38,7 @@ export default async function ChannelsPage() {
           <div className="md:col-span-2">
             <button type="submit" className="btn btn-primary">Tạo kênh</button>
           </div>
-        </form>
+        </JsonActionForm>
       </section>
 
       <section className="panel rounded-[1.6rem] p-4">
@@ -91,9 +70,15 @@ export default async function ChannelsPage() {
 
                   return (
                     <tr key={channel.id}>
-                      <td data-label="Tên" >
-                        <form action={updateChannelAction} className="grid gap-2">
-                          <input type="hidden" name="id" value={channel.id} />
+                      <td data-label="Tên">
+                        <JsonActionForm
+                          endpoint={`/api/channels/${channel.id}`}
+                          method="PATCH"
+                          successMessage="Cập nhật kênh thông báo thành công"
+                          errorMessage="Không thể cập nhật kênh thông báo"
+                          className="grid gap-2"
+                          booleanFields={["isActive"]}
+                        >
                           <input className="field" name="name" defaultValue={channel.name} />
                           <input className="field" name="botToken" defaultValue={config.botToken ?? ""} />
                           <input className="field" name="chatId" defaultValue={config.chatId ?? ""} />
@@ -105,7 +90,7 @@ export default async function ChannelsPage() {
                             <input type="checkbox" name="isActive" defaultChecked={channel.isActive} /> Kích hoạt
                           </label>
                           <button type="submit" className="btn btn-secondary">Lưu kênh</button>
-                        </form>
+                        </JsonActionForm>
                       </td>
                       <td data-label="Loại">{channel.type}</td>
                       <td data-label="Trạng thái"><StatusBadge value={channel.isActive ? "active" : "inactive"} /></td>
