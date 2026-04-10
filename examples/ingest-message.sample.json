@@ -1,0 +1,13 @@
+{
+  "source": "zalo",
+  "groupExternalId": "123456",
+  "groupName": "Sales Group",
+  "messageExternalId": "msg_abc",
+  "senderExternalId": "u_111",
+  "senderName": "Nguyen Van A",
+  "messageText": "PB can 2 ban support mascot toi nay",
+  "messageTime": "2026-04-08T10:15:22.000Z",
+  "rawPayload": {
+    "example": true
+  }
+}

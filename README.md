@@ -1,36 +1,90 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Zalo Alert Admin
 
-## Getting Started
+Next.js fullstack admin + API for monitored message alerts, with PostgreSQL/Prisma, DB-backed `notification_delivery` queue, a separate worker runtime, and a watcher runtime with a built-in simulator.
 
-First, run the development server:
+## What is included
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
-```
+- Admin login with credentials + DB-backed session cookie
+- Groups CRUD
+- Rules CRUD
+- Group-rule mapping
+- Telegram notification_channel CRUD
+- Watcher config + heartbeat + ingest APIs
+- Rule engine with `CONTAINS` and `WHOLE_WORD`
+- Dedupe with strong external-id key and fingerprint fallback
+- Match logs with reason and normalized text
+- DB-backed `notification_delivery` outbox/queue
+- Worker runtime for Telegram delivery
+- Watcher simulator using fixture payloads
+- Logs UI and watcher status UI
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## Local setup
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. Copy `.env.example` to `.env` and adjust values.
+2. Start PostgreSQL or point `DATABASE_URL` and `DIRECT_URL` to Supabase.
+3. Install dependencies with `npm install`.
+4. Generate Prisma client: `npm run db:generate`
+5. Apply schema: `npm run db:migrate`
+6. Seed baseline data: `npm run db:seed`
+7. Start the app: `npm run dev`
+8. Start the worker: `npm run worker`
+9. Start the watcher simulator: `npm run watcher:mock`
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Default admin credentials
 
-## Learn More
+- Email: value from `ADMIN_SEED_EMAIL`
+- Password: value from `ADMIN_SEED_PASSWORD`
 
-To learn more about Next.js, take a look at the following resources:
+## Useful commands
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+- `npm run typecheck`
+- `npm run lint`
+- `npm run test`
+- `npm run bootstrap-admin`
+- `npm run worker`
+- `npm run watcher:mock`
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## API highlights
 
-## Deploy on Vercel
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/auth/me`
+- `GET|POST /api/groups`
+- `PATCH|DELETE /api/groups/:id`
+- `GET|POST /api/rules`
+- `PATCH|DELETE /api/rules/:id`
+- `GET|POST /api/groups/:id/rules`
+- `GET|POST /api/channels`
+- `PATCH /api/channels/:id`
+- `GET /api/logs`
+- `GET /api/logs/:id`
+- `GET /api/watcher/config`
+- `POST /api/watcher/heartbeat`
+- `POST /api/watcher/messages`
+- `GET /api/health`
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Fixture and sample payloads
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- `fixtures/sample-messages.json`
+- `fixtures/mock-config.json`
+- `examples/ingest-message.sample.json`
+- `examples/watcher-heartbeat.sample.json`
+- `examples/telegram-channel.sample.json`
+- `examples/evaluation-result.sample.json`
+
+## Windows note
+
+- This repo uses `next dev --webpack` and `next build --webpack` by default to avoid a Turbopack junction/symlink issue with Prisma on Windows.
+
+## Supabase note
+
+- Set `DATABASE_URL` to the pooled connection string.
+- Set `DIRECT_URL` to the direct connection string for Prisma migrations.
+- If `.env` still contains `[YOUR-PASSWORD]`, Prisma cannot connect until you replace that placeholder with your real database password.
+
+## Current limitations
+
+- Phase 1 supports Telegram only for actual delivery.
+- Watcher simulator runs a mock adapter; no real source adapter is included.
+- Delivery queue is PostgreSQL-backed and intentionally simple for MVP scale.
+- Soft delete is not implemented; destructive admin deletes are hard deletes in MVP.

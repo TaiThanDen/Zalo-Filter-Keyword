@@ -1,0 +1,9 @@
+{
+  "type": "TELEGRAM",
+  "name": "Main Telegram Alert",
+  "isActive": true,
+  "config": {
+    "botToken": "123456:replace_me",
+    "chatId": "123456789"
+  }
+}

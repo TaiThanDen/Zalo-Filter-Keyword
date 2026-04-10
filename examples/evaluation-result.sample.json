@@ -1,0 +1,8 @@
+{
+  "accepted": true,
+  "decision": "MATCHED",
+  "reason": "matched",
+  "matchedIncludeRules": ["PB", "sup", "mascot"],
+  "matchedExcludeRules": [],
+  "notificationDeliveriesCreated": 1
+}

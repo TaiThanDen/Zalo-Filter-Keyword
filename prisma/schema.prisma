@@ -1,0 +1,200 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum UserRole {
+  ADMIN
+}
+
+enum RuleType {
+  INCLUDE
+  EXCLUDE
+}
+
+enum MatchType {
+  CONTAINS
+  WHOLE_WORD
+}
+
+enum ChannelType {
+  TELEGRAM
+  MESSENGER
+}
+
+enum NotificationDeliveryStatus {
+  PENDING
+  PROCESSING
+  SENT
+  FAILED
+  RETRY_SCHEDULED
+}
+
+enum MatchDecision {
+  MATCHED
+  REJECTED_NO_INCLUDE
+  REJECTED_BY_EXCLUDE
+  REJECTED_GROUP_DISABLED
+  REJECTED_DUPLICATE
+  REJECTED_UNKNOWN_GROUP
+}
+
+enum WatcherReportedStatus {
+  ONLINE
+  DEGRADED
+  OFFLINE
+}
+
+model User {
+  id           String    @id @default(cuid())
+  email        String    @unique
+  passwordHash String
+  role         UserRole  @default(ADMIN)
+  isActive     Boolean   @default(true)
+  sessions     Session[]
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  lastSeenAt DateTime?
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Watcher {
+  id              String                @id @default(cuid())
+  name            String
+  apiKeyHash      String                @unique
+  reportedStatus  WatcherReportedStatus @default(OFFLINE)
+  lastHeartbeatAt DateTime?
+  lastSeenIp      String?
+  lastVersion     String?
+  groups          Group[]
+  inboundMessages InboundMessage[]
+  createdAt       DateTime              @default(now())
+  updatedAt       DateTime              @updatedAt
+}
+
+model Group {
+  id              String           @id @default(cuid())
+  source          String           @default("zalo")
+  externalId      String
+  name            String
+  isEnabled       Boolean          @default(true)
+  watcherId       String?
+  watcher         Watcher?         @relation(fields: [watcherId], references: [id], onDelete: SetNull)
+  groupRules      GroupRule[]
+  inboundMessages InboundMessage[]
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  @@unique([source, externalId])
+  @@index([isEnabled])
+}
+
+model Rule {
+  id            String     @id @default(cuid())
+  type          RuleType
+  pattern       String
+  matchType     MatchType  @default(CONTAINS)
+  caseSensitive Boolean    @default(false)
+  isActive      Boolean    @default(true)
+  note          String?
+  groupRules    GroupRule[]
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@index([type, isActive])
+}
+
+model GroupRule {
+  id        String   @id @default(cuid())
+  groupId   String
+  ruleId    String
+  group     Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  rule      Rule     @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([groupId, ruleId])
+}
+
+model InboundMessage {
+  id                String      @id @default(cuid())
+  source            String      @default("zalo")
+  watcherId         String?
+  watcher           Watcher?    @relation(fields: [watcherId], references: [id], onDelete: SetNull)
+  groupId           String?
+  group             Group?      @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  groupExternalId   String
+  groupName         String?
+  messageExternalId String?
+  senderExternalId  String?
+  senderName        String?
+  messageText       String
+  normalizedText    String
+  messageTime       DateTime
+  fingerprint       String
+  rawPayload        Json?
+  createdAt         DateTime    @default(now())
+  matchLog          MatchLog?
+
+  @@index([groupExternalId, messageTime])
+  @@index([fingerprint])
+  @@index([messageExternalId])
+}
+
+model MatchLog {
+  id                     String                  @id @default(cuid())
+  inboundMessageId       String                  @unique
+  decision               MatchDecision
+  matchedIncludeRules    Json?
+  matchedExcludeRules    Json?
+  reason                 String?
+  processedAt            DateTime                @default(now())
+  inboundMessage         InboundMessage          @relation(fields: [inboundMessageId], references: [id], onDelete: Cascade)
+  notificationDeliveries NotificationDelivery[]
+
+  @@index([decision, processedAt])
+}
+
+model NotificationChannel {
+  id                     String                 @id @default(cuid())
+  type                   ChannelType
+  name                   String
+  isActive               Boolean                @default(true)
+  config                 Json
+  notificationDeliveries NotificationDelivery[]
+  createdAt              DateTime               @default(now())
+  updatedAt              DateTime               @updatedAt
+}
+
+model NotificationDelivery {
+  id                    String                     @id @default(cuid())
+  matchLogId            String
+  notificationChannelId String
+  status                NotificationDeliveryStatus @default(PENDING)
+  attempts              Int                        @default(0)
+  nextRetryAt           DateTime?
+  sentAt                DateTime?
+  lastError             String?
+  payload               Json?
+  createdAt             DateTime                   @default(now())
+  updatedAt             DateTime                   @updatedAt
+  matchLog              MatchLog                   @relation(fields: [matchLogId], references: [id], onDelete: Cascade)
+  notificationChannel   NotificationChannel        @relation(fields: [notificationChannelId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextRetryAt])
+  @@index([notificationChannelId, status])
+}

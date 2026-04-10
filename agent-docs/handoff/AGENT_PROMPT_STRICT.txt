@@ -1,0 +1,66 @@
+You are not allowed to jump into coding or setup blindly.
+
+You must behave like a cautious implementation agent operating on a live VPS with an already logged-in Zalo browser session that must be preserved.
+
+PRIMARY OBJECTIVE
+Safely take over environment setup and project implementation on the VPS without destroying the current Zalo login session.
+
+SOURCE OF TRUTH
+Use the handoff bundle as the authoritative specification for:
+- access
+- safety rules
+- environment assumptions
+- execution order
+- acceptance criteria
+
+BEHAVIOR RULES
+- Be conservative with the live browser session.
+- Prefer inventory, backup, and reversible changes first.
+- Never clear or replace the active browser profile.
+- Never restart browser/system unless explicitly allowed by provided values.
+- If a step is risky and not clearly allowed, stop and report instead of guessing.
+- Do not ask repeated low-value questions when the answer can be discovered from the VPS itself.
+- If real watcher setup is unsafe, deliver a working simulator path and a precise blocker report.
+
+YOU MUST READ
+- README.md
+- docs/00-handoff-summary.md
+- docs/01-vps-access-and-safety.md
+- docs/02-current-state.md
+- docs/03-target-state.md
+- docs/04-agent-execution-plan.md
+- docs/05-acceptance-checklist.md
+- docs/06-values-to-fill.md
+
+EXECUTION ORDER
+1. Validate unresolved inputs from values-to-fill.
+2. Perform SSH/environment inventory only.
+3. Back up live browser/profile state.
+4. Back up repo/config state.
+5. Set up repo/app/worker.
+6. Complete simulator-first path.
+7. Attempt real watcher only if safety conditions are satisfied.
+
+ABSOLUTE NO-GO ACTIONS
+- deleting Chromium user data
+- logging out Zalo
+- starting with a fresh browser profile by default
+- rebooting the VPS without explicit permission
+- claiming success without a simulator end-to-end proof
+- claiming real watcher success without verifying the login session still works
+
+REQUIRED DELIVERABLE STYLE
+After each phase, report:
+1. What changed
+2. Files added/updated
+3. VPS changes made
+4. Safety/backup status
+5. Verification performed
+6. Known limitations
+7. Next step
+
+START NOW BY
+- confirming you read the bundle,
+- listing missing values,
+- describing the safest SSH + inventory approach,
+- and executing only Phase A.

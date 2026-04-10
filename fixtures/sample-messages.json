@@ -1,0 +1,28 @@
+[
+  {
+    "source": "zalo",
+    "groupExternalId": "123456",
+    "groupName": "Sales Group",
+    "messageExternalId": "msg_abc",
+    "senderExternalId": "u_111",
+    "senderName": "Nguyen Van A",
+    "messageText": "PB can 2 ban support mascot toi nay",
+    "messageTime": "2026-04-08T10:15:22.000Z",
+    "rawPayload": {
+      "fixture": "match"
+    }
+  },
+  {
+    "source": "zalo",
+    "groupExternalId": "123456",
+    "groupName": "Sales Group",
+    "messageExternalId": "msg_def",
+    "senderExternalId": "u_222",
+    "senderName": "Nguyen Van B",
+    "messageText": "supplies list da cap nhat",
+    "messageTime": "2026-04-08T10:16:22.000Z",
+    "rawPayload": {
+      "fixture": "exclude"
+    }
+  }
+]
