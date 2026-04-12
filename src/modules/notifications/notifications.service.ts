@@ -6,6 +6,23 @@ import { AppError } from "@/src/lib/errors";
 import { notificationsRepository } from "@/src/modules/notifications/notifications.repository";
 import { telegramProvider } from "@/src/modules/notifications/telegram.provider";
 import type { NotificationPayload } from "@/src/modules/notifications/notifications.types";
+import { rulesRepository } from "@/src/modules/rules/rules.repository";
+
+async function ensureNotificationRulesExist(ruleIds: string[]) {
+  const uniqueRuleIds = Array.from(new Set(ruleIds));
+
+  if (uniqueRuleIds.length === 0) {
+    return [];
+  }
+
+  const rules = await rulesRepository.findManyByIds(uniqueRuleIds);
+
+  if (rules.length !== uniqueRuleIds.length) {
+    throw new AppError("RULE_NOT_FOUND", "One or more selected rules do not exist", 400);
+  }
+
+  return uniqueRuleIds;
+}
 
 export async function listNotificationChannels() {
   return notificationsRepository.listChannels();
@@ -26,16 +43,28 @@ export async function createNotificationChannel(input: {
   name: string;
   isActive: boolean;
   config: Prisma.InputJsonValue;
+  ruleIds: string[];
 }) {
-  return notificationsRepository.createChannel(input);
+  const ruleIds = await ensureNotificationRulesExist(input.ruleIds);
+
+  return notificationsRepository.createChannel({
+    ...input,
+    ruleIds,
+  });
 }
 
 export async function updateNotificationChannel(
   id: string,
-  input: { name?: string; isActive?: boolean; config?: Prisma.InputJsonValue },
+  input: { name?: string; isActive?: boolean; config?: Prisma.InputJsonValue; ruleIds?: string[] },
 ) {
   await getNotificationChannelById(id);
-  return notificationsRepository.updateChannel(id, input);
+
+  const ruleIds = input.ruleIds === undefined ? undefined : await ensureNotificationRulesExist(input.ruleIds);
+
+  return notificationsRepository.updateChannel(id, {
+    ...input,
+    ...(ruleIds === undefined ? {} : { ruleIds }),
+  });
 }
 
 export async function deleteNotificationChannel(id: string) {
@@ -46,10 +75,12 @@ export async function deleteNotificationChannel(id: string) {
 export async function scheduleNotificationDeliveries(
   matchLogId: string,
   payload: NotificationPayload,
+  matchedRuleIds: string[],
 ) {
   return notificationsRepository.createDeliveries({
     matchLogId,
     payload: payload as Prisma.InputJsonValue,
+    matchedRuleIds,
   });
 }
 

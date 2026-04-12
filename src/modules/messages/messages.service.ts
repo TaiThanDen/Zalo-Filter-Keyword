@@ -97,13 +97,17 @@ export async function ingestInboundMessage(
   let notificationDeliveriesCreated = 0;
 
   if (evaluation.decision === MatchDecision.MATCHED) {
-    const created = await scheduleNotificationDeliveries(matchLog.id, {
-      groupName: group.name,
-      senderName: payload.senderName || payload.senderExternalId || "Unknown sender",
-      messageText: payload.messageText,
-      messageTime: messageTime.toISOString(),
-      matchedKeywords: Array.from(new Set(evaluation.includeHits.map((rule) => rule.pattern))),
-    });
+    const created = await scheduleNotificationDeliveries(
+      matchLog.id,
+      {
+        groupName: group.name,
+        senderName: payload.senderName || payload.senderExternalId || "Unknown sender",
+        messageText: payload.messageText,
+        messageTime: messageTime.toISOString(),
+        matchedKeywords: Array.from(new Set(evaluation.includeHits.map((rule) => rule.pattern))),
+      },
+      evaluation.includeHits.map((rule) => rule.id),
+    );
     notificationDeliveriesCreated = created.length;
   }
 
@@ -117,3 +121,4 @@ export async function ingestInboundMessage(
     notificationDeliveriesCreated,
   };
 }
+

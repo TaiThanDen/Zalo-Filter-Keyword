@@ -15,6 +15,7 @@ function normalizeChannelPayload(json: Record<string, unknown>) {
     type: json.type ?? "TELEGRAM",
     name: json.name,
     isActive: json.isActive,
+    ruleIds: json.ruleIds,
     config: {
       botToken: json.botToken,
       chatId: json.chatId,

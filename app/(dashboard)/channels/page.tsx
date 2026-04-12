@@ -1,4 +1,5 @@
 import { listNotificationChannels } from '@/src/modules/notifications/notifications.service';
+import { listRules } from '@/src/modules/rules/rules.service';
 import { StatusBadge } from '@/src/components/ui/status-badge';
 import { JsonActionForm } from '@/src/components/forms/json-action-form';
 
@@ -14,15 +15,61 @@ function maskToken(token?: string) {
   return `${token.slice(0, 6)}...${token.slice(-4)}`;
 }
 
+function RuleSelector(props: {
+  rules: Array<{
+    id: string;
+    pattern: string;
+    isActive: boolean;
+    note: string | null;
+  }>;
+  selectedRuleIds?: string[];
+  description: string;
+}) {
+  const selectedRuleIds = new Set(props.selectedRuleIds ?? []);
+
+  return (
+    <div className="space-y-3 lg:col-span-2">
+      <div className="space-y-1">
+        <div className="text-sm font-medium text-[var(--color-muted)]">Rule muốn nhận</div>
+        <p className="text-sm leading-6 text-[var(--color-muted)]">{props.description}</p>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        {props.rules.map((rule) => (
+          <label
+            key={rule.id}
+            className="flex min-h-16 items-start gap-3 rounded-2xl border border-[var(--color-border)] bg-white/75 px-4 py-3 text-sm"
+          >
+            <input type="checkbox" name="ruleIds" value={rule.id} defaultChecked={selectedRuleIds.has(rule.id)} className="mt-1" />
+            <span className="space-y-1">
+              <span className="flex flex-wrap items-center gap-2 font-medium text-[var(--color-text)]">
+                <span>{rule.pattern}</span>
+                <span className="status-pill" style={{ background: rule.isActive ? 'rgba(84, 133, 117, 0.12)' : 'rgba(95, 78, 58, 0.08)', color: 'var(--color-muted)' }}>
+                  {rule.isActive ? 'đang bật' : 'đang tắt'}
+                </span>
+              </span>
+              <span className="block text-xs leading-5 text-[var(--color-muted)]">
+                {rule.note?.trim() || 'Không chọn gì nghĩa là kênh này sẽ nhận tất cả rule.'}
+              </span>
+            </span>
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default async function ChannelsPage() {
-  const channels = await listNotificationChannels();
+  const [channels, rules] = await Promise.all([
+    listNotificationChannels(),
+    listRules({ type: 'INCLUDE' }),
+  ]);
 
   return (
     <div className="space-y-8">
       <section className="space-y-3">
         <h2 className="text-3xl font-semibold tracking-tight">Kênh thông báo</h2>
         <p className="max-w-3xl text-sm leading-6 text-[var(--color-muted)]">
-          Cấu hình kênh Telegram để worker gửi cảnh báo. Bạn có thể tạo mới, chỉnh sửa hoặc xóa từng kênh ngay trên trang này.
+          Cấu hình kênh Telegram để worker gửi cảnh báo. Mỗi kênh có thể chọn riêng các rule muốn nhận, còn nếu để trống thì mặc định nhận tất cả rule đang match.
         </p>
       </section>
 
@@ -36,7 +83,7 @@ export default async function ChannelsPage() {
           </div>
           <div className="rounded-2xl border border-[var(--color-border)] bg-white/70 px-4 py-3 text-sm text-[var(--color-muted)]">
             <div>Loại hỗ trợ: Telegram</div>
-            <div>Trạng thái mặc định: đang bật</div>
+            <div>Nếu không chọn rule nào: nhận tất cả</div>
           </div>
         </div>
 
@@ -47,6 +94,7 @@ export default async function ChannelsPage() {
           errorMessage="Không thể tạo kênh thông báo"
           className="grid gap-3 lg:grid-cols-2"
           booleanFields={["isActive"]}
+          arrayFields={["ruleIds"]}
           resetOnSuccess
         >
           <label className="space-y-2">
@@ -68,6 +116,10 @@ export default async function ChannelsPage() {
               <option value="MarkdownV2">MarkdownV2</option>
             </select>
           </label>
+          <RuleSelector
+            rules={rules}
+            description="Chọn các rule mà kênh này muốn nhận. Nếu để trống, kênh sẽ nhận mọi alert match rule."
+          />
           <label className="inline-flex min-h-14 items-center gap-3 rounded-2xl border border-[var(--color-border)] bg-white/75 px-4 text-sm font-medium text-[var(--color-muted)] lg:col-span-2">
             <input type="checkbox" name="isActive" defaultChecked /> Kích hoạt kênh ngay sau khi tạo
           </label>
@@ -89,10 +141,12 @@ export default async function ChannelsPage() {
               chatId?: string;
               parseMode?: string;
             };
+            const assignedRules = channel.notificationChannelRules.map((channelRule) => channelRule.rule);
+            const assignedRuleIds = assignedRules.map((rule) => rule.id);
 
             return (
               <section key={channel.id} className="panel rounded-[1.8rem] p-5 sm:p-6">
-                <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_18rem]">
+                <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_20rem]">
                   <div className="space-y-5">
                     <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
                       <div className="space-y-2">
@@ -116,6 +170,7 @@ export default async function ChannelsPage() {
                       errorMessage="Không thể cập nhật kênh thông báo"
                       className="grid gap-3 lg:grid-cols-2"
                       booleanFields={["isActive"]}
+                      arrayFields={["ruleIds"]}
                     >
                       <label className="space-y-2">
                         <span className="text-sm font-medium text-[var(--color-muted)]">Tên kênh</span>
@@ -136,12 +191,17 @@ export default async function ChannelsPage() {
                           <option value="MarkdownV2">MarkdownV2</option>
                         </select>
                       </label>
+                      <RuleSelector
+                        rules={rules}
+                        selectedRuleIds={assignedRuleIds}
+                        description="Bỏ chọn hết nếu muốn kênh này nhận tất cả alert. Chỉ các rule match mới được gửi đến kênh đã chọn."
+                      />
                       <label className="inline-flex min-h-14 items-center gap-3 rounded-2xl border border-[var(--color-border)] bg-white/75 px-4 text-sm font-medium text-[var(--color-muted)] lg:col-span-2">
                         <input type="checkbox" name="isActive" defaultChecked={channel.isActive} /> Kích hoạt kênh này
                       </label>
                       <div className="lg:col-span-2 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                         <p className="text-sm leading-6 text-[var(--color-muted)]">
-                          Chỉnh sửa token, chat ID hoặc trạng thái rồi lưu để worker dùng ngay ở lượt gửi tiếp theo.
+                          Chỉnh sửa token, chat ID, trạng thái hoặc danh sách rule rồi lưu để worker dùng ngay ở lượt gửi tiếp theo.
                         </p>
                         <button type="submit" className="btn btn-secondary sm:min-w-36">Lưu kênh</button>
                       </div>
@@ -161,6 +221,22 @@ export default async function ChannelsPage() {
                       <div>
                         <div className="text-xs font-semibold uppercase tracking-[0.14em]">Parse mode</div>
                         <div className="mt-1 font-medium text-[var(--color-text)]">{config.parseMode ?? 'HTML'}</div>
+                      </div>
+                      <div>
+                        <div className="text-xs font-semibold uppercase tracking-[0.14em]">Rule đang nhận</div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {assignedRules.length === 0 ? (
+                            <span className="status-pill" style={{ background: 'rgba(84, 133, 117, 0.12)', color: 'var(--color-text)' }}>
+                              Tất cả rule
+                            </span>
+                          ) : (
+                            assignedRules.map((rule) => (
+                              <span key={rule.id} className="status-pill" style={{ background: 'rgba(95, 78, 58, 0.08)', color: 'var(--color-text)' }}>
+                                {rule.pattern}
+                              </span>
+                            ))
+                          )}
+                        </div>
                       </div>
                     </div>
 

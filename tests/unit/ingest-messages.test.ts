@@ -1,4 +1,4 @@
-﻿import assert from "node:assert/strict";
+import assert from "node:assert/strict";
 import test from "node:test";
 import { MatchDecision, MatchType, Prisma, RuleType, WatcherReportedStatus, type Watcher } from "@prisma/client";
 import { db } from "@/src/lib/db";
@@ -175,6 +175,7 @@ test("ingest auto-creates unknown group, evaluates first message, and schedules 
   });
   assert.deepEqual(deliveryInput, {
     matchLogId: "match-log-1",
+    matchedRuleIds: ["rule-PB"],
     payload: {
       groupName: "PB Support Group",
       senderName: "Alice",

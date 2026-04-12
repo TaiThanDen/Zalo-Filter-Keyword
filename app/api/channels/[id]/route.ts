@@ -17,6 +17,7 @@ function normalizeChannelPayload(json: Record<string, unknown>) {
   return {
     name: json.name,
     isActive: json.isActive,
+    ruleIds: json.ruleIds,
     ...(hasFlatConfigFields
       ? {
           config: {

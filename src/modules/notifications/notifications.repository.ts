@@ -7,6 +7,19 @@ type TelegramConfig = {
   parseMode?: string;
 };
 
+const notificationChannelInclude = {
+  notificationChannelRules: {
+    include: {
+      rule: true,
+    },
+    orderBy: {
+      rule: {
+        pattern: 'asc',
+      },
+    },
+  },
+} satisfies Prisma.NotificationChannelInclude;
+
 function buildChannelDestinationKey(channel: {
   id: string;
   type: 'TELEGRAM' | 'MESSENGER';
@@ -25,25 +38,79 @@ function buildChannelDestinationKey(channel: {
   ].join('|');
 }
 
+function dedupeRuleIds(ruleIds: string[]) {
+  return Array.from(new Set(ruleIds));
+}
+
 export const notificationsRepository = {
   listChannels() {
     return db.notificationChannel.findMany({
+      include: notificationChannelInclude,
       orderBy: { updatedAt: 'desc' },
     });
   },
   findChannelById(id: string) {
-    return db.notificationChannel.findUnique({ where: { id } });
+    return db.notificationChannel.findUnique({
+      where: { id },
+      include: notificationChannelInclude,
+    });
   },
   createChannel(data: {
     type: 'TELEGRAM' | 'MESSENGER';
     name: string;
     isActive: boolean;
     config: Prisma.InputJsonValue;
+    ruleIds: string[];
   }) {
-    return db.notificationChannel.create({ data });
+    const ruleIds = dedupeRuleIds(data.ruleIds);
+
+    return db.notificationChannel.create({
+      data: {
+        type: data.type,
+        name: data.name,
+        isActive: data.isActive,
+        config: data.config,
+        ...(ruleIds.length > 0
+          ? {
+              notificationChannelRules: {
+                createMany: {
+                  data: ruleIds.map((ruleId) => ({ ruleId })),
+                  skipDuplicates: true,
+                },
+              },
+            }
+          : {}),
+      },
+      include: notificationChannelInclude,
+    });
   },
-  updateChannel(id: string, data: { name?: string; isActive?: boolean; config?: Prisma.InputJsonValue }) {
-    return db.notificationChannel.update({ where: { id }, data });
+  updateChannel(id: string, data: { name?: string; isActive?: boolean; config?: Prisma.InputJsonValue; ruleIds?: string[] }) {
+    const ruleIds = data.ruleIds === undefined ? undefined : dedupeRuleIds(data.ruleIds);
+
+    return db.notificationChannel.update({
+      where: { id },
+      data: {
+        ...(data.name === undefined ? {} : { name: data.name }),
+        ...(data.isActive === undefined ? {} : { isActive: data.isActive }),
+        ...(data.config === undefined ? {} : { config: data.config }),
+        ...(ruleIds === undefined
+          ? {}
+          : {
+              notificationChannelRules: {
+                deleteMany: {},
+                ...(ruleIds.length > 0
+                  ? {
+                      createMany: {
+                        data: ruleIds.map((ruleId) => ({ ruleId })),
+                        skipDuplicates: true,
+                      },
+                    }
+                  : {}),
+              },
+            }),
+      },
+      include: notificationChannelInclude,
+    });
   },
   deleteChannel(id: string) {
     return db.notificationChannel.delete({ where: { id } });
@@ -51,15 +118,38 @@ export const notificationsRepository = {
   createDeliveries(data: {
     matchLogId: string;
     payload: Prisma.InputJsonValue;
+    matchedRuleIds: string[];
   }) {
     return db.$transaction(async (tx) => {
-      const channels = await tx.notificationChannel.findMany({ where: { isActive: true } });
+      const matchedRuleIds = new Set(data.matchedRuleIds);
+      const channels = await tx.notificationChannel.findMany({
+        where: { isActive: true },
+        include: {
+          notificationChannelRules: {
+            select: {
+              ruleId: true,
+            },
+          },
+        },
+      });
 
       if (channels.length === 0) {
         return [];
       }
 
-      const dedupedChannels = channels.filter((channel, index, items) => {
+      const matchingChannels = channels.filter((channel) => {
+        if (channel.notificationChannelRules.length === 0) {
+          return true;
+        }
+
+        if (matchedRuleIds.size === 0) {
+          return false;
+        }
+
+        return channel.notificationChannelRules.some((channelRule) => matchedRuleIds.has(channelRule.ruleId));
+      });
+
+      const dedupedChannels = matchingChannels.filter((channel, index, items) => {
         const currentKey = buildChannelDestinationKey(channel);
         return items.findIndex((candidate) => buildChannelDestinationKey(candidate) === currentKey) === index;
       });

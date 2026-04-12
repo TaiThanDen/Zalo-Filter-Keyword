@@ -105,16 +105,17 @@ model Group {
 }
 
 model Rule {
-  id            String     @id @default(cuid())
-  type          RuleType
-  pattern       String
-  matchType     MatchType  @default(CONTAINS)
-  caseSensitive Boolean    @default(false)
-  isActive      Boolean    @default(true)
-  note          String?
-  groupRules    GroupRule[]
-  createdAt     DateTime   @default(now())
-  updatedAt     DateTime   @updatedAt
+  id                       String                    @id @default(cuid())
+  type                     RuleType
+  pattern                  String
+  matchType                MatchType                 @default(CONTAINS)
+  caseSensitive            Boolean                   @default(false)
+  isActive                 Boolean                   @default(true)
+  note                     String?
+  groupRules               GroupRule[]
+  notificationChannelRules NotificationChannelRule[]
+  createdAt                DateTime                  @default(now())
+  updatedAt                DateTime                  @updatedAt
 
   @@index([type, isActive])
 }
@@ -170,14 +171,27 @@ model MatchLog {
 }
 
 model NotificationChannel {
-  id                     String                 @id @default(cuid())
-  type                   ChannelType
-  name                   String
-  isActive               Boolean                @default(true)
-  config                 Json
-  notificationDeliveries NotificationDelivery[]
-  createdAt              DateTime               @default(now())
-  updatedAt              DateTime               @updatedAt
+  id                       String                    @id @default(cuid())
+  type                     ChannelType
+  name                     String
+  isActive                 Boolean                   @default(true)
+  config                   Json
+  notificationChannelRules NotificationChannelRule[]
+  notificationDeliveries   NotificationDelivery[]
+  createdAt                DateTime                  @default(now())
+  updatedAt                DateTime                  @updatedAt
+}
+
+model NotificationChannelRule {
+  id                    String              @id @default(cuid())
+  notificationChannelId String
+  ruleId                String
+  notificationChannel   NotificationChannel @relation(fields: [notificationChannelId], references: [id], onDelete: Cascade)
+  rule                  Rule                @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  createdAt             DateTime            @default(now())
+
+  @@unique([notificationChannelId, ruleId])
+  @@index([ruleId])
 }
 
 model NotificationDelivery {
