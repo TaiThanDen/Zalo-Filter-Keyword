@@ -1,4 +1,4 @@
-import sampleMessages from '@/fixtures/sample-messages.json';
+﻿import sampleMessages from '@/fixtures/sample-messages.json';
 import { env } from '@/src/config/env';
 import { sha256 } from '@/src/lib/crypto';
 import { logger } from '@/src/lib/logger';
@@ -66,6 +66,12 @@ type ConversationSnapshot = {
   unread: boolean;
 };
 
+export type StoredGroupCandidate = {
+  externalId: string;
+  lastReceiveTs: number | null;
+  isArchived: boolean;
+};
+
 type PersistedWatcherState = {
   knownSignatures: Record<string, string>;
 };
@@ -77,6 +83,9 @@ type RawConversationSnapshot = {
   timeLabelRaw: string | null;
   unread: boolean;
 };
+
+const LAST_RECEIVE_TS_KEY = /^0_(g[^_]+)_lastReceiveTs$/;
+const ARCHIVED_CHAT_KEY_SUFFIX = '__archived_chat';
 
 function parsePreview(preview: string) {
   const separatorIndex = preview.indexOf(':');
@@ -232,6 +241,120 @@ function resolveMessageTime(timeLabel: string | null) {
   return now.toISOString();
 }
 
+function safeParseJson(value: string) {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+export function parseStoredGroupCandidates(localStorageEntries: Array<[string, string]>): StoredGroupCandidate[] {
+  const groups = new Map<string, StoredGroupCandidate>();
+
+  for (const [key, value] of localStorageEntries) {
+    const lastReceiveTsMatch = key.match(LAST_RECEIVE_TS_KEY);
+
+    if (lastReceiveTsMatch) {
+      const externalId = lastReceiveTsMatch[1];
+      const parsedTs = Number(value);
+      const current = groups.get(externalId);
+
+      groups.set(externalId, {
+        externalId,
+        lastReceiveTs: Number.isFinite(parsedTs) ? parsedTs : current?.lastReceiveTs ?? null,
+        isArchived: current?.isArchived ?? false,
+      });
+      continue;
+    }
+
+    if (!key.endsWith(ARCHIVED_CHAT_KEY_SUFFIX)) {
+      continue;
+    }
+
+    const parsed = safeParseJson(value);
+    if (!Array.isArray(parsed)) {
+      continue;
+    }
+
+    for (const item of parsed) {
+      if (!item || typeof item !== 'object') {
+        continue;
+      }
+
+      const externalId = typeof (item as { id?: unknown }).id === 'string' ? (item as { id: string }).id : null;
+      if (!externalId?.startsWith('g')) {
+        continue;
+      }
+
+      const current = groups.get(externalId);
+      groups.set(externalId, {
+        externalId,
+        lastReceiveTs: current?.lastReceiveTs ?? null,
+        isArchived: true,
+      });
+    }
+  }
+
+  return Array.from(groups.values()).sort((left, right) => {
+    const leftTs = left.lastReceiveTs ?? Number.NEGATIVE_INFINITY;
+    const rightTs = right.lastReceiveTs ?? Number.NEGATIVE_INFINITY;
+
+    if (rightTs !== leftTs) {
+      return rightTs - leftTs;
+    }
+
+    if (left.isArchived !== right.isArchived) {
+      return Number(left.isArchived) - Number(right.isArchived);
+    }
+
+    return left.externalId.localeCompare(right.externalId);
+  });
+}
+
+export function mergeDiscoveredGroups(input: {
+  visibleSnapshots: ConversationSnapshot[];
+  storedGroups: StoredGroupCandidate[];
+  limit: number;
+  groupsOnly: boolean;
+}): DiscoveredSourceGroup[] {
+  const groups = new Map<string, DiscoveredSourceGroup>();
+
+  for (const snapshot of input.visibleSnapshots) {
+    if (!snapshot.animDataId) {
+      continue;
+    }
+
+    if (input.groupsOnly && !snapshot.animDataId.startsWith('g')) {
+      continue;
+    }
+
+    groups.set(snapshot.animDataId, {
+      source: 'zalo',
+      externalId: snapshot.animDataId,
+      name: snapshot.name ?? snapshot.animDataId,
+    });
+  }
+
+  for (const storedGroup of input.storedGroups) {
+    if (input.groupsOnly && !storedGroup.externalId.startsWith('g')) {
+      continue;
+    }
+
+    if (groups.has(storedGroup.externalId)) {
+      continue;
+    }
+
+    groups.set(storedGroup.externalId, {
+      source: 'zalo',
+      externalId: storedGroup.externalId,
+      name: storedGroup.externalId,
+    });
+  }
+
+  return Array.from(groups.values()).slice(0, input.limit);
+}
+
 const readVisibleSnapshotsFn = new Function(
   'rows',
   `
@@ -298,16 +421,24 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
 
   async listGroups() {
     const page = await this.ensurePage();
-    const snapshots = await this.collectSnapshots(page, env.WATCHER_PLAYWRIGHT_GROUP_DISCOVERY_LIMIT);
+    const [snapshots, storedGroups] = await Promise.all([
+      this.collectSnapshots(page, env.WATCHER_PLAYWRIGHT_GROUP_DISCOVERY_LIMIT),
+      this.readStoredGroupCandidates(page),
+    ]);
+    const groups = mergeDiscoveredGroups({
+      visibleSnapshots: snapshots,
+      storedGroups,
+      limit: env.WATCHER_PLAYWRIGHT_GROUP_DISCOVERY_LIMIT,
+      groupsOnly: env.WATCHER_PLAYWRIGHT_GROUPS_ONLY,
+    });
 
-    return snapshots
-      .filter((snapshot) => snapshot.animDataId && snapshot.name)
-      .filter((snapshot) => !env.WATCHER_PLAYWRIGHT_GROUPS_ONLY || snapshot.animDataId.startsWith('g'))
-      .map((snapshot) => ({
-        source: 'zalo' as const,
-        externalId: snapshot.animDataId,
-        name: snapshot.name ?? snapshot.animDataId,
-      }));
+    logger.info('watcher_playwright_group_discovery_completed', {
+      visibleSnapshots: snapshots.length,
+      storedGroups: storedGroups.length,
+      totalGroups: groups.length,
+    });
+
+    return groups;
   }
 
   private async ensurePage() {
@@ -393,6 +524,32 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     )) as RawConversationSnapshot[];
 
     return rawSnapshots.map(toConversationSnapshot);
+  }
+
+  private async readStoredGroupCandidates(page: Page) {
+    const localStorageEntries = (await page.evaluate(() => {
+      const entries: Array<[string, string]> = [];
+
+      for (let index = 0; index < localStorage.length; index += 1) {
+        const key = localStorage.key(index);
+        if (!key) {
+          continue;
+        }
+
+        if (!/^0_g[^_]+_lastReceiveTs$/.test(key) && !key.endsWith('__archived_chat')) {
+          continue;
+        }
+
+        const value = localStorage.getItem(key);
+        if (value !== null) {
+          entries.push([key, value]);
+        }
+      }
+
+      return entries;
+    })) as Array<[string, string]>;
+
+    return parseStoredGroupCandidates(localStorageEntries);
   }
 
   private async collectSnapshots(page: Page, limit: number) {
@@ -514,3 +671,4 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
 export function createSourceAdapter(mode: 'mock' | 'adapter') {
   return mode === 'mock' ? new MockAdapter() : new PlaywrightConversationListAdapter();
 }
+

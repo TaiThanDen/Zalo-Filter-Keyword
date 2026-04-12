@@ -1,4 +1,4 @@
-import assert from "node:assert/strict";
+﻿import assert from "node:assert/strict";
 import test from "node:test";
 import { MatchDecision, MatchType, Prisma, RuleType, WatcherReportedStatus, type Watcher } from "@prisma/client";
 import { db } from "@/src/lib/db";
@@ -216,47 +216,42 @@ test("ensureDiscoveredGroup falls back to existing group on unique conflict with
   let createCalls = 0;
   let updateInput: unknown;
   let findUniqueCalls = 0;
-  const tx = {
-    rule: {
-      findMany: async () => [{ id: "rule-1" }],
-    },
-    groupRule: {
-      createMany: async () => ({ count: 1 }),
-    },
-    group: {
-      findUnique: async () => {
-        findUniqueCalls += 1;
-        return findUniqueCalls === 1 ? null : (existingGroupRecord as unknown);
-      },
-      create: async () => {
-        createCalls += 1;
-        throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
-          code: "P2002",
-          clientVersion: "test",
-          meta: { target: ["source", "externalId"] },
-        });
-      },
-      update: async (input: unknown) => {
-        updateInput = input;
-        return { id: "group-existing" };
-      },
-      findUniqueOrThrow: async (input: { select?: unknown }) => {
-        if (input.select) {
-          return existingGroupRecord;
-        }
-
-        return hydratedGroup;
-      },
-    },
-  };
 
   restore.push(
-    stubMethod(db, "$transaction", async (arg: unknown) => {
-      if (typeof arg !== "function") {
-        throw new Error("Expected interactive transaction callback");
+    stubMethod(db.rule, "findMany", async () => [{ id: "rule-1" }]),
+  );
+  restore.push(
+    stubMethod(db.groupRule, "createMany", async () => ({ count: 1 })),
+  );
+  restore.push(
+    stubMethod(db.group, "findUnique", async () => {
+      findUniqueCalls += 1;
+      return findUniqueCalls === 1 ? (null as unknown) : (existingGroupRecord as unknown);
+    }),
+  );
+  restore.push(
+    stubMethod(db.group, "create", async () => {
+      createCalls += 1;
+      throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+        code: "P2002",
+        clientVersion: "test",
+        meta: { target: ["source", "externalId"] },
+      });
+    }),
+  );
+  restore.push(
+    stubMethod(db.group, "update", async (input: unknown) => {
+      updateInput = input;
+      return { id: "group-existing" } as never;
+    }),
+  );
+  restore.push(
+    stubMethod(db.group, "findUniqueOrThrow", async (input: { select?: unknown }) => {
+      if (input.select) {
+        return existingGroupRecord as never;
       }
 
-      return (arg as (client: typeof tx) => Promise<unknown>)(tx);
+      return hydratedGroup as never;
     }),
   );
 
@@ -280,3 +275,4 @@ test("ensureDiscoveredGroup falls back to existing group on unique conflict with
   assert.equal(result.group.id, "group-existing");
   assert.equal(result.group.name, "Fresh name from payload");
 });
+

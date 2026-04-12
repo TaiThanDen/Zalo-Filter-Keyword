@@ -1,14 +1,16 @@
-import { Prisma } from '@prisma/client';
+﻿import { Prisma } from '@prisma/client';
 import { db } from '@/src/lib/db';
 
-async function createGroupRuleMappings(tx: Prisma.TransactionClient, groupId: string) {
-  const rules = await tx.rule.findMany({ select: { id: true } });
+type GroupPersistenceClient = Pick<typeof db, 'group' | 'groupRule' | 'rule'>;
+
+async function createGroupRuleMappings(client: GroupPersistenceClient, groupId: string) {
+  const rules = await client.rule.findMany({ select: { id: true } });
 
   if (rules.length === 0) {
     return;
   }
 
-  await tx.groupRule.createMany({
+  await client.groupRule.createMany({
     data: rules.map((rule) => ({ groupId, ruleId: rule.id })),
     skipDuplicates: true,
   });
@@ -31,8 +33,8 @@ function shouldUpdateDiscoveredGroupName(
   return existing.name.trim() === existing.externalId.trim();
 }
 
-async function findGroupWithRelations(tx: Prisma.TransactionClient, id: string) {
-  return tx.group.findUniqueOrThrow({
+async function findGroupWithRelations(client: GroupPersistenceClient, id: string) {
+  return client.group.findUniqueOrThrow({
     where: { id },
     include: {
       watcher: true,
@@ -43,8 +45,8 @@ async function findGroupWithRelations(tx: Prisma.TransactionClient, id: string) 
   });
 }
 
-async function ensureDiscoveredGroupTx(
-  tx: Prisma.TransactionClient,
+async function ensureDiscoveredGroupRecord(
+  client: GroupPersistenceClient,
   input: {
     source: string;
     externalId: string;
@@ -53,7 +55,7 @@ async function ensureDiscoveredGroupTx(
   },
 ) {
   const normalizedName = normalizeGroupName(input.name) ?? input.externalId;
-  const existing = await tx.group.findUnique({
+  const existing = await client.group.findUnique({
     where: {
       source_externalId: {
         source: input.source,
@@ -75,7 +77,7 @@ async function ensureDiscoveredGroupTx(
     const shouldUpdate = Boolean(nextName) || shouldUpdateWatcherId;
 
     if (shouldUpdate) {
-      await tx.group.update({
+      await client.group.update({
         where: { id: existing.id },
         data: {
           ...(nextName ? { name: nextName } : {}),
@@ -85,14 +87,14 @@ async function ensureDiscoveredGroupTx(
     }
 
     return {
-      group: await findGroupWithRelations(tx, existing.id),
+      group: await findGroupWithRelations(client, existing.id),
       created: false,
       updated: shouldUpdate,
     };
   }
 
   try {
-    const group = await tx.group.create({
+    const group = await client.group.create({
       data: {
         source: input.source,
         externalId: input.externalId,
@@ -103,10 +105,10 @@ async function ensureDiscoveredGroupTx(
       include: { watcher: true },
     });
 
-    await createGroupRuleMappings(tx, group.id);
+    await createGroupRuleMappings(client, group.id);
 
     return {
-      group: await findGroupWithRelations(tx, group.id),
+      group: await findGroupWithRelations(client, group.id),
       created: true,
       updated: false,
     };
@@ -115,7 +117,7 @@ async function ensureDiscoveredGroupTx(
       throw error;
     }
 
-    const conflictedGroup = await tx.group.findUniqueOrThrow({
+    const conflictedGroup = await client.group.findUniqueOrThrow({
       where: {
         source_externalId: {
           source: input.source,
@@ -138,7 +140,7 @@ async function ensureDiscoveredGroupTx(
     const shouldUpdate = Boolean(nextName) || shouldUpdateWatcherId;
 
     if (shouldUpdate) {
-      await tx.group.update({
+      await client.group.update({
         where: { id: conflictedGroup.id },
         data: {
           ...(nextName ? { name: nextName } : {}),
@@ -148,7 +150,7 @@ async function ensureDiscoveredGroupTx(
     }
 
     return {
-      group: await findGroupWithRelations(tx, conflictedGroup.id),
+      group: await findGroupWithRelations(client, conflictedGroup.id),
       created: false,
       updated: shouldUpdate,
     };
@@ -229,26 +231,24 @@ export const groupsRepository = {
     name?: string | null;
     watcherId?: string | null;
   }) {
-    return db.$transaction((tx) => ensureDiscoveredGroupTx(tx, data));
+    return ensureDiscoveredGroupRecord(db, data);
   },
-  create(data: { source: string; externalId: string; name: string; isEnabled: boolean; watcherId?: string | null }) {
-    return db.$transaction(async (tx) => {
-      const group = await tx.group.create({
-        data,
-        include: { watcher: true },
-      });
+  async create(data: { source: string; externalId: string; name: string; isEnabled: boolean; watcherId?: string | null }) {
+    const group = await db.group.create({
+      data,
+      include: { watcher: true },
+    });
 
-      await createGroupRuleMappings(tx, group.id);
+    await createGroupRuleMappings(db, group.id);
 
-      return tx.group.findUniqueOrThrow({
-        where: { id: group.id },
-        include: {
-          watcher: true,
-          groupRules: {
-            include: { rule: true },
-          },
+    return db.group.findUniqueOrThrow({
+      where: { id: group.id },
+      include: {
+        watcher: true,
+        groupRules: {
+          include: { rule: true },
         },
-      });
+      },
     });
   },
   update(id: string, data: { name?: string; isEnabled?: boolean; watcherId?: string | null }) {
@@ -294,31 +294,29 @@ export const groupsRepository = {
         ) === index,
     );
 
-    return db.$transaction(async (tx) => {
-      let created = 0;
-      let updated = 0;
+    let created = 0;
+    let updated = 0;
 
-      for (const group of uniqueGroups) {
-        const result = await ensureDiscoveredGroupTx(tx, {
-          source: group.source,
-          externalId: group.externalId,
-          name: group.name,
-          watcherId,
-        });
+    for (const group of uniqueGroups) {
+      const result = await groupsRepository.ensureDiscoveredGroup({
+        source: group.source,
+        externalId: group.externalId,
+        name: group.name,
+        watcherId,
+      });
 
-        if (result.created) {
-          created += 1;
-        } else if (result.updated) {
-          updated += 1;
-        }
+      if (result.created) {
+        created += 1;
+      } else if (result.updated) {
+        updated += 1;
       }
+    }
 
-      return {
-        total: uniqueGroups.length,
-        created,
-        updated,
-      };
-    });
+    return {
+      total: uniqueGroups.length,
+      created,
+      updated,
+    };
   },
   listForWatcher(watcherId: string) {
     return db.group.findMany({
