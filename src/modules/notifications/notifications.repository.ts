@@ -7,18 +7,22 @@ type TelegramConfig = {
   parseMode?: string;
 };
 
-const notificationChannelInclude = {
-  notificationChannelRules: {
-    include: {
-      rule: true,
-    },
-    orderBy: {
-      rule: {
-        pattern: 'asc',
+const notificationChannelWithRulesArgs = Prisma.validator<Prisma.NotificationChannelDefaultArgs>()({
+  include: {
+    notificationChannelRules: {
+      include: {
+        rule: true,
+      },
+      orderBy: {
+        rule: {
+          pattern: 'asc',
+        },
       },
     },
   },
-} satisfies Prisma.NotificationChannelInclude;
+});
+
+export type NotificationChannelWithRules = Prisma.NotificationChannelGetPayload<typeof notificationChannelWithRulesArgs>;
 
 function buildChannelDestinationKey(channel: {
   id: string;
@@ -45,14 +49,14 @@ function dedupeRuleIds(ruleIds: string[]) {
 export const notificationsRepository = {
   listChannels() {
     return db.notificationChannel.findMany({
-      include: notificationChannelInclude,
+      include: notificationChannelWithRulesArgs.include,
       orderBy: { updatedAt: 'desc' },
     });
   },
   findChannelById(id: string) {
     return db.notificationChannel.findUnique({
       where: { id },
-      include: notificationChannelInclude,
+      include: notificationChannelWithRulesArgs.include,
     });
   },
   createChannel(data: {
@@ -81,7 +85,7 @@ export const notificationsRepository = {
             }
           : {}),
       },
-      include: notificationChannelInclude,
+      include: notificationChannelWithRulesArgs.include,
     });
   },
   updateChannel(id: string, data: { name?: string; isActive?: boolean; config?: Prisma.InputJsonValue; ruleIds?: string[] }) {
@@ -109,7 +113,7 @@ export const notificationsRepository = {
               },
             }),
       },
-      include: notificationChannelInclude,
+      include: notificationChannelWithRulesArgs.include,
     });
   },
   deleteChannel(id: string) {
