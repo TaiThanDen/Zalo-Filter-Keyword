@@ -1,5 +1,5 @@
 import { MatchDecision, Prisma, type Watcher } from "@prisma/client";
-import { groupsRepository } from "@/src/modules/groups/groups.repository";
+import { ensureGroupForInboundMessage } from "@/src/modules/groups/groups.service";
 import { scheduleNotificationDeliveries } from "@/src/modules/notifications/notifications.service";
 import { buildFingerprint, evaluateRules, normalizeText } from "@/src/modules/matching/matching.service";
 import { messagesRepository } from "@/src/modules/messages/messages.repository";
@@ -32,6 +32,13 @@ export async function ingestInboundMessage(
     rawPayload?: Prisma.InputJsonValue;
   },
 ) {
+  const group = await ensureGroupForInboundMessage({
+    source: payload.source,
+    groupExternalId: payload.groupExternalId,
+    groupName: payload.groupName,
+    watcherId: watcher.id,
+  });
+
   const messageTime = new Date(payload.messageTime);
   const normalizedText = normalizeText(payload.messageText, false);
   const fingerprint = buildFingerprint({
@@ -42,8 +49,6 @@ export async function ingestInboundMessage(
     normalizedText,
     messageTime,
   });
-
-  const group = await groupsRepository.findBySourceExternalId(payload.source, payload.groupExternalId);
 
   const duplicate = payload.messageExternalId
     ? await messagesRepository.findPotentialDuplicateByExternalId({
@@ -58,17 +63,17 @@ export async function ingestInboundMessage(
       });
 
   const evaluation = evaluateRules({
-    isGroupKnown: Boolean(group),
-    isGroupEnabled: group?.isEnabled ?? false,
+    isGroupKnown: true,
+    isGroupEnabled: group.isEnabled,
     isDuplicate: Boolean(duplicate),
     messageText: payload.messageText,
-    rules: group?.groupRules.map((groupRule) => groupRule.rule) ?? [],
+    rules: group.groupRules.map((groupRule) => groupRule.rule),
   });
 
   const inboundMessage = await messagesRepository.createInboundMessage({
     source: payload.source,
     watcherId: watcher.id,
-    groupId: group?.id ?? null,
+    groupId: group.id,
     groupExternalId: payload.groupExternalId,
     groupName: payload.groupName ?? null,
     messageExternalId: payload.messageExternalId ?? null,
@@ -93,7 +98,7 @@ export async function ingestInboundMessage(
 
   if (evaluation.decision === MatchDecision.MATCHED) {
     const created = await scheduleNotificationDeliveries(matchLog.id, {
-      groupName: group?.name || payload.groupName || payload.groupExternalId,
+      groupName: group.name,
       senderName: payload.senderName || payload.senderExternalId || "Unknown sender",
       messageText: payload.messageText,
       messageTime: messageTime.toISOString(),

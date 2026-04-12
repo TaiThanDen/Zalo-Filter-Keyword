@@ -1,17 +1,41 @@
-import { NotificationDeliveryStatus, Prisma } from "@prisma/client";
-import { db } from "@/src/lib/db";
+import { NotificationDeliveryStatus, Prisma } from '@prisma/client';
+import { db } from '@/src/lib/db';
+
+type TelegramConfig = {
+  botToken?: string;
+  chatId?: string;
+  parseMode?: string;
+};
+
+function buildChannelDestinationKey(channel: {
+  id: string;
+  type: 'TELEGRAM' | 'MESSENGER';
+  config: Prisma.JsonValue;
+}) {
+  if (channel.type !== 'TELEGRAM') {
+    return `${channel.type}:${channel.id}`;
+  }
+
+  const config = (channel.config ?? {}) as TelegramConfig;
+  return [
+    channel.type,
+    String(config.botToken ?? ''),
+    String(config.chatId ?? ''),
+    String(config.parseMode ?? ''),
+  ].join('|');
+}
 
 export const notificationsRepository = {
   listChannels() {
     return db.notificationChannel.findMany({
-      orderBy: { updatedAt: "desc" },
+      orderBy: { updatedAt: 'desc' },
     });
   },
   findChannelById(id: string) {
     return db.notificationChannel.findUnique({ where: { id } });
   },
   createChannel(data: {
-    type: "TELEGRAM" | "MESSENGER";
+    type: 'TELEGRAM' | 'MESSENGER';
     name: string;
     isActive: boolean;
     config: Prisma.InputJsonValue;
@@ -20,6 +44,9 @@ export const notificationsRepository = {
   },
   updateChannel(id: string, data: { name?: string; isActive?: boolean; config?: Prisma.InputJsonValue }) {
     return db.notificationChannel.update({ where: { id }, data });
+  },
+  deleteChannel(id: string) {
+    return db.notificationChannel.delete({ where: { id } });
   },
   createDeliveries(data: {
     matchLogId: string;
@@ -32,8 +59,13 @@ export const notificationsRepository = {
         return [];
       }
 
+      const dedupedChannels = channels.filter((channel, index, items) => {
+        const currentKey = buildChannelDestinationKey(channel);
+        return items.findIndex((candidate) => buildChannelDestinationKey(candidate) === currentKey) === index;
+      });
+
       return Promise.all(
-        channels.map((channel) =>
+        dedupedChannels.map((channel) =>
           tx.notificationDelivery.create({
             data: {
               matchLogId: data.matchLogId,
@@ -68,7 +100,7 @@ export const notificationsRepository = {
           },
         },
       },
-      orderBy: { createdAt: "asc" },
+      orderBy: { createdAt: 'asc' },
       take,
     });
   },

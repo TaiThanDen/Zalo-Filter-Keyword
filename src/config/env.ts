@@ -1,4 +1,4 @@
-﻿import { loadEnvConfig } from "@next/env";
+import { loadEnvConfig } from "@next/env";
 import { z } from "zod";
 import { IMPLEMENTATION_DEFAULTS } from "@/src/config/constants";
 
@@ -26,9 +26,11 @@ const envSchema = z.object({
   WATCHER_BUFFER_FILE_PATH: z.string().default("./fixtures/watcher-buffer.jsonl"),
   WATCHER_CDP_URL: z.string().url().default("http://127.0.0.1:9222"),
   WATCHER_ZALO_URL: z.string().url().default("https://chat.zalo.me/"),
+  WATCHER_PLAYWRIGHT_STATE_FILE: z.string().default("./data/watcher-playwright-state.json"),
   WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(10_000),
-  WATCHER_PLAYWRIGHT_VISIBLE_ITEM_LIMIT: z.coerce.number().int().positive().default(12),
-  WATCHER_PLAYWRIGHT_EMIT_INITIAL_SNAPSHOT: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
+  WATCHER_PLAYWRIGHT_VISIBLE_ITEM_LIMIT: z.coerce.number().int().positive().default(40),
+  WATCHER_PLAYWRIGHT_GROUP_DISCOVERY_LIMIT: z.coerce.number().int().positive().default(200),
+  WATCHER_PLAYWRIGHT_EMIT_INITIAL_SNAPSHOT: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
   WATCHER_PLAYWRIGHT_GROUPS_ONLY: z.enum(["true", "false"]).default("true").transform((value) => value === "true"),
   WORKER_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(5_000),
   NOTIFICATION_MAX_ATTEMPTS: z.coerce.number().int().positive().default(IMPLEMENTATION_DEFAULTS.notificationMaxAttempts),

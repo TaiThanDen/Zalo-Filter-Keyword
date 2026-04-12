@@ -38,6 +38,11 @@ export async function updateNotificationChannel(
   return notificationsRepository.updateChannel(id, input);
 }
 
+export async function deleteNotificationChannel(id: string) {
+  await getNotificationChannelById(id);
+  await notificationsRepository.deleteChannel(id);
+}
+
 export async function scheduleNotificationDeliveries(
   matchLogId: string,
   payload: NotificationPayload,

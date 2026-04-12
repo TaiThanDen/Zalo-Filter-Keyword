@@ -43,6 +43,22 @@ export async function getGroupById(id: string) {
   return group;
 }
 
+export async function ensureGroupForInboundMessage(input: {
+  source: string;
+  groupExternalId: string;
+  groupName?: string;
+  watcherId?: string | null;
+}) {
+  const result = await groupsRepository.ensureDiscoveredGroup({
+    source: input.source,
+    externalId: input.groupExternalId,
+    name: input.groupName ?? input.groupExternalId,
+    watcherId: input.watcherId ?? null,
+  });
+
+  return result.group;
+}
+
 export async function createGroup(input: {
   source: string;
   externalId: string;

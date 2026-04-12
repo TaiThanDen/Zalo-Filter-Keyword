@@ -110,6 +110,12 @@ code {
   color: var(--color-text);
 }
 
+.btn-danger {
+  border: 1px solid color-mix(in srgb, var(--color-danger) 26%, white);
+  background: color-mix(in srgb, var(--color-danger) 12%, white);
+  color: var(--color-danger);
+}
+
 .status-pill {
   display: inline-flex;
   align-items: center;

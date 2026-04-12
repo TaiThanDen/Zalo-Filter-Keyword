@@ -5,6 +5,7 @@ import { db } from "@/src/lib/db";
 import { AppError } from "@/src/lib/errors";
 import { ageInMilliseconds } from "@/src/lib/time";
 import { sha256 } from "@/src/lib/crypto";
+import { groupsRepository } from "@/src/modules/groups/groups.repository";
 
 export async function authenticateWatcherApiKey(apiKey: string) {
   const watcher = await db.watcher.findUnique({
@@ -71,6 +72,13 @@ export async function recordHeartbeat(
       reportedStatus,
     },
   });
+}
+
+export async function syncWatcherGroups(
+  watcherId: string,
+  groups: Array<{ source: string; externalId: string; name: string }>,
+) {
+  return groupsRepository.syncDiscoveredGroups(watcherId, groups);
 }
 
 export async function getWatcherConfig(watcherId: string) {

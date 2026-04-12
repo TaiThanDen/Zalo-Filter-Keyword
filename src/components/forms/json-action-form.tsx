@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
@@ -15,6 +15,7 @@ type JsonActionFormProps = {
   arrayFields?: string[];
   nullIfEmptyFields?: string[];
   resetOnSuccess?: boolean;
+  confirmMessage?: string;
 };
 
 function buildPayload(formData: FormData, options: Pick<JsonActionFormProps, "booleanFields" | "arrayFields" | "nullIfEmptyFields">) {
@@ -60,6 +61,7 @@ export function JsonActionForm({
   arrayFields,
   nullIfEmptyFields,
   resetOnSuccess = false,
+  confirmMessage,
 }: JsonActionFormProps) {
   const router = useRouter();
   const formRef = useRef<HTMLFormElement>(null);
@@ -68,6 +70,10 @@ export function JsonActionForm({
   async function onSubmit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (pending) {
+      return;
+    }
+
+    if (confirmMessage && !window.confirm(confirmMessage)) {
       return;
     }
 

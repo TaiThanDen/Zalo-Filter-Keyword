@@ -1,7 +1,11 @@
-﻿import { appendFile, readFile, unlink } from "node:fs/promises";
+import { appendFile, readFile, unlink } from "node:fs/promises";
 import { env } from "@/src/config/env";
 import { logger } from "@/src/lib/logger";
-import { createSourceAdapter, type SourceMessageEvent } from "@/src/modules/watchers/source-adapters";
+import {
+  createSourceAdapter,
+  type DiscoveredSourceGroup,
+  type SourceMessageEvent,
+} from "@/src/modules/watchers/source-adapters";
 
 async function fetchConfig() {
   const response = await fetch(`${env.WATCHER_API_BASE_URL}/api/watcher/config`, {
@@ -33,6 +37,23 @@ async function sendHeartbeat() {
   if (!response.ok) {
     throw new Error(`Watcher heartbeat failed with status ${response.status}`);
   }
+}
+
+async function syncGroups(groups: DiscoveredSourceGroup[]) {
+  const response = await fetch(`${env.WATCHER_API_BASE_URL}/api/watcher/groups/sync`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${env.WATCHER_API_KEY}`,
+    },
+    body: JSON.stringify({ groups }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Watcher group sync failed with status ${response.status}`);
+  }
+
+  return response.json() as Promise<{ total: number; created: number; updated: number }>;
 }
 
 async function bufferPayload(payload: SourceMessageEvent) {
@@ -93,15 +114,30 @@ async function sendMessage(payload: SourceMessageEvent) {
   }
 }
 
+async function syncGroupsFromAdapter(adapter: ReturnType<typeof createSourceAdapter>) {
+  const groups = await adapter.listGroups();
+
+  if (groups.length === 0) {
+    logger.info("watcher_group_sync_skipped", { reason: "no_groups_detected" });
+    return;
+  }
+
+  const result = await syncGroups(groups);
+  logger.info("watcher_group_sync_completed", result);
+}
+
 async function main() {
   const mode = process.argv.includes("--mode=mock") ? "mock" : "adapter";
   const adapter = createSourceAdapter(mode);
 
   logger.info("watcher_started", { mode });
 
+  await sendHeartbeat();
+  await syncGroupsFromAdapter(adapter);
+
   const config = await fetchConfig();
   logger.info("watcher_config_loaded", config);
-  await sendHeartbeat();
+
   await flushBuffer(sendMessage);
   await adapter.start(sendMessage);
 
@@ -116,6 +152,12 @@ async function main() {
   setInterval(() => {
     fetchConfig().catch((error) => {
       logger.warn("watcher_config_refresh_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+
+    syncGroupsFromAdapter(adapter).catch((error) => {
+      logger.warn("watcher_group_sync_failed", {
         error: error instanceof Error ? error.message : String(error),
       });
     });
