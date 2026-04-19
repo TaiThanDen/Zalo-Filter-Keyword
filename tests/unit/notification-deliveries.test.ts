@@ -11,6 +11,64 @@ function stubMethod<T extends object, K extends keyof T>(obj: T, key: K, value: 
   };
 }
 
+type MockChannel = {
+  id: string;
+  type: 'TELEGRAM' | 'MESSENGER';
+  config: { botToken: string; chatId: string; parseMode: string };
+  notificationChannelRules: Array<{ ruleId: string }>;
+};
+
+type MockTransaction = {
+  matchLog: {
+    findUniqueOrThrow: () => Promise<{
+      inboundMessage: {
+        source: string;
+        normalizedText: string;
+        senderExternalId: string;
+        senderName: string;
+        messageTime: Date;
+      };
+    }>;
+  };
+  notificationChannel: {
+    findMany: () => Promise<MockChannel[]>;
+  };
+  notificationDelivery: {
+    findFirst: (input: { where: { notificationChannelId: string } }) => Promise<{ id: string } | null>;
+    create: (input: { data: { notificationChannelId: string } }) => Promise<{ id: string }>;
+  };
+};
+
+function createBaseTransactionState() {
+  const createdChannelIds: string[] = [];
+
+  const tx: MockTransaction = {
+    matchLog: {
+      findUniqueOrThrow: async () => ({
+        inboundMessage: {
+          source: 'zalo',
+          normalizedText: 'need pg support',
+          senderExternalId: 'sender-1',
+          senderName: 'Alice',
+          messageTime: new Date('2026-04-19T12:00:00.000Z'),
+        },
+      }),
+    },
+    notificationChannel: {
+      findMany: async () => [],
+    },
+    notificationDelivery: {
+      findFirst: async () => null,
+      create: async (input: { data: { notificationChannelId: string } }) => {
+        createdChannelIds.push(input.data.notificationChannelId);
+        return { id: `delivery-${input.data.notificationChannelId}` };
+      },
+    },
+  };
+
+  return { tx, createdChannelIds };
+}
+
 test('createDeliveries sends to channels with matching rules and channels with no rule filter', async (t) => {
   const restore: Array<() => void> = [];
   t.after(() => {
@@ -19,43 +77,33 @@ test('createDeliveries sends to channels with matching rules and channels with n
     }
   });
 
-  const createdChannelIds: string[] = [];
-  const tx = {
-    notificationChannel: {
-      findMany: async () => [
-        {
-          id: 'channel-all',
-          type: 'TELEGRAM',
-          config: { botToken: 'token-a', chatId: '-1001', parseMode: 'HTML' },
-          notificationChannelRules: [],
-        },
-        {
-          id: 'channel-pb',
-          type: 'TELEGRAM',
-          config: { botToken: 'token-b', chatId: '-1002', parseMode: 'HTML' },
-          notificationChannelRules: [{ ruleId: 'rule-pb' }],
-        },
-        {
-          id: 'channel-pg',
-          type: 'TELEGRAM',
-          config: { botToken: 'token-c', chatId: '-1003', parseMode: 'HTML' },
-          notificationChannelRules: [{ ruleId: 'rule-pg' }],
-        },
-        {
-          id: 'channel-pb-duplicate-destination',
-          type: 'TELEGRAM',
-          config: { botToken: 'token-b', chatId: '-1002', parseMode: 'HTML' },
-          notificationChannelRules: [{ ruleId: 'rule-pb' }],
-        },
-      ],
+  const { tx, createdChannelIds } = createBaseTransactionState();
+  tx.notificationChannel.findMany = async () => [
+    {
+      id: 'channel-all',
+      type: 'TELEGRAM',
+      config: { botToken: 'token-a', chatId: '-1001', parseMode: 'HTML' },
+      notificationChannelRules: [],
     },
-    notificationDelivery: {
-      create: async (input: { data: { notificationChannelId: string } }) => {
-        createdChannelIds.push(input.data.notificationChannelId);
-        return { id: `delivery-${input.data.notificationChannelId}` };
-      },
+    {
+      id: 'channel-pb',
+      type: 'TELEGRAM',
+      config: { botToken: 'token-b', chatId: '-1002', parseMode: 'HTML' },
+      notificationChannelRules: [{ ruleId: 'rule-pb' }],
     },
-  };
+    {
+      id: 'channel-pg',
+      type: 'TELEGRAM',
+      config: { botToken: 'token-c', chatId: '-1003', parseMode: 'HTML' },
+      notificationChannelRules: [{ ruleId: 'rule-pg' }],
+    },
+    {
+      id: 'channel-pb-duplicate-destination',
+      type: 'TELEGRAM',
+      config: { botToken: 'token-b', chatId: '-1002', parseMode: 'HTML' },
+      notificationChannelRules: [{ ruleId: 'rule-pb' }],
+    },
+  ];
 
   restore.push(
     stubMethod(db, '$transaction', async (callback: unknown) => {
@@ -63,7 +111,7 @@ test('createDeliveries sends to channels with matching rules and channels with n
         throw new Error('Expected interactive transaction callback');
       }
 
-      return (callback as (client: typeof tx) => Promise<unknown>)(tx);
+      return (callback as (client: MockTransaction) => Promise<unknown>)(tx);
     }),
   );
 
@@ -85,31 +133,21 @@ test('createDeliveries does not send rule-filtered channels when no selected rul
     }
   });
 
-  const createdChannelIds: string[] = [];
-  const tx = {
-    notificationChannel: {
-      findMany: async () => [
-        {
-          id: 'channel-all',
-          type: 'TELEGRAM',
-          config: { botToken: 'token-a', chatId: '-1001', parseMode: 'HTML' },
-          notificationChannelRules: [],
-        },
-        {
-          id: 'channel-pb',
-          type: 'TELEGRAM',
-          config: { botToken: 'token-b', chatId: '-1002', parseMode: 'HTML' },
-          notificationChannelRules: [{ ruleId: 'rule-pb' }],
-        },
-      ],
+  const { tx, createdChannelIds } = createBaseTransactionState();
+  tx.notificationChannel.findMany = async () => [
+    {
+      id: 'channel-all',
+      type: 'TELEGRAM',
+      config: { botToken: 'token-a', chatId: '-1001', parseMode: 'HTML' },
+      notificationChannelRules: [],
     },
-    notificationDelivery: {
-      create: async (input: { data: { notificationChannelId: string } }) => {
-        createdChannelIds.push(input.data.notificationChannelId);
-        return { id: `delivery-${input.data.notificationChannelId}` };
-      },
+    {
+      id: 'channel-pb',
+      type: 'TELEGRAM',
+      config: { botToken: 'token-b', chatId: '-1002', parseMode: 'HTML' },
+      notificationChannelRules: [{ ruleId: 'rule-pb' }],
     },
-  };
+  ];
 
   restore.push(
     stubMethod(db, '$transaction', async (callback: unknown) => {
@@ -117,7 +155,7 @@ test('createDeliveries does not send rule-filtered channels when no selected rul
         throw new Error('Expected interactive transaction callback');
       }
 
-      return (callback as (client: typeof tx) => Promise<unknown>)(tx);
+      return (callback as (client: MockTransaction) => Promise<unknown>)(tx);
     }),
   );
 
@@ -127,6 +165,61 @@ test('createDeliveries does not send rule-filtered channels when no selected rul
     matchedRuleIds: ['rule-helper'],
   });
 
+  assert.deepEqual(createdChannelIds, ['channel-all']);
+  assert.equal(deliveries.length, 1);
+});
+
+test('createDeliveries suppresses duplicate Telegram alerts for same sender and content across groups', async (t) => {
+  const restore: Array<() => void> = [];
+  t.after(() => {
+    while (restore.length > 0) {
+      restore.pop()?.();
+    }
+  });
+
+  const { tx, createdChannelIds } = createBaseTransactionState();
+  const findFirstCalls: string[] = [];
+  tx.notificationChannel.findMany = async () => [
+    {
+      id: 'channel-all',
+      type: 'TELEGRAM',
+      config: { botToken: 'token-a', chatId: '-1001', parseMode: 'HTML' },
+      notificationChannelRules: [],
+    },
+    {
+      id: 'channel-pg',
+      type: 'TELEGRAM',
+      config: { botToken: 'token-b', chatId: '-1002', parseMode: 'HTML' },
+      notificationChannelRules: [{ ruleId: 'rule-pg' }],
+    },
+  ];
+  tx.notificationDelivery.findFirst = async (input: { where: { notificationChannelId: string } }) => {
+    findFirstCalls.push(input.where.notificationChannelId);
+
+    if (input.where.notificationChannelId === 'channel-pg') {
+      return { id: 'delivery-existing' };
+    }
+
+    return null;
+  };
+
+  restore.push(
+    stubMethod(db, '$transaction', async (callback: unknown) => {
+      if (typeof callback !== 'function') {
+        throw new Error('Expected interactive transaction callback');
+      }
+
+      return (callback as (client: MockTransaction) => Promise<unknown>)(tx);
+    }),
+  );
+
+  const deliveries = await notificationsRepository.createDeliveries({
+    matchLogId: 'match-log-3',
+    payload: { matchedKeywords: ['PG'] },
+    matchedRuleIds: ['rule-pg'],
+  });
+
+  assert.deepEqual(findFirstCalls, ['channel-all', 'channel-pg']);
   assert.deepEqual(createdChannelIds, ['channel-all']);
   assert.equal(deliveries.length, 1);
 });

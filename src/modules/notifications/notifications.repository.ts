@@ -1,4 +1,5 @@
 import { NotificationDeliveryStatus, Prisma } from '@prisma/client';
+import { IMPLEMENTATION_DEFAULTS } from '@/src/config/constants';
 import { db } from '@/src/lib/db';
 
 type TelegramConfig = {
@@ -44,6 +45,24 @@ function buildChannelDestinationKey(channel: {
 
 function dedupeRuleIds(ruleIds: string[]) {
   return Array.from(new Set(ruleIds));
+}
+
+function buildNotificationSenderWhere(input: {
+  senderExternalId?: string | null;
+  senderName?: string | null;
+}): Prisma.InboundMessageWhereInput {
+  if (input.senderExternalId) {
+    return { senderExternalId: input.senderExternalId };
+  }
+
+  if (input.senderName) {
+    return { senderName: input.senderName };
+  }
+
+  return {
+    senderExternalId: null,
+    senderName: null,
+  };
 }
 
 export const notificationsRepository = {
@@ -126,6 +145,26 @@ export const notificationsRepository = {
   }) {
     return db.$transaction(async (tx) => {
       const matchedRuleIds = new Set(data.matchedRuleIds);
+      const currentMatchLog = await tx.matchLog.findUniqueOrThrow({
+        where: { id: data.matchLogId },
+        include: {
+          inboundMessage: {
+            select: {
+              source: true,
+              normalizedText: true,
+              senderExternalId: true,
+              senderName: true,
+              messageTime: true,
+            },
+          },
+        },
+      });
+      const duplicateWindowStart = new Date(
+        currentMatchLog.inboundMessage.messageTime.getTime() - IMPLEMENTATION_DEFAULTS.duplicateWindowMs,
+      );
+      const duplicateWindowEnd = new Date(
+        currentMatchLog.inboundMessage.messageTime.getTime() + IMPLEMENTATION_DEFAULTS.duplicateWindowMs,
+      );
       const channels = await tx.notificationChannel.findMany({
         where: { isActive: true },
         include: {
@@ -157,18 +196,51 @@ export const notificationsRepository = {
         const currentKey = buildChannelDestinationKey(channel);
         return items.findIndex((candidate) => buildChannelDestinationKey(candidate) === currentKey) === index;
       });
+      const deliveries = [];
 
-      return Promise.all(
-        dedupedChannels.map((channel) =>
-          tx.notificationDelivery.create({
+      for (const channel of dedupedChannels) {
+        const existingDelivery = await tx.notificationDelivery.findFirst({
+          where: {
+            notificationChannelId: channel.id,
+            status: {
+              in: [
+                NotificationDeliveryStatus.PENDING,
+                NotificationDeliveryStatus.PROCESSING,
+                NotificationDeliveryStatus.SENT,
+                NotificationDeliveryStatus.RETRY_SCHEDULED,
+              ],
+            },
+            matchLog: {
+              inboundMessage: {
+                source: currentMatchLog.inboundMessage.source,
+                normalizedText: currentMatchLog.inboundMessage.normalizedText,
+                messageTime: {
+                  gte: duplicateWindowStart,
+                  lte: duplicateWindowEnd,
+                },
+                ...buildNotificationSenderWhere(currentMatchLog.inboundMessage),
+              },
+            },
+          },
+          select: { id: true },
+        });
+
+        if (existingDelivery) {
+          continue;
+        }
+
+        deliveries.push(
+          await tx.notificationDelivery.create({
             data: {
               matchLogId: data.matchLogId,
               notificationChannelId: channel.id,
               payload: data.payload,
             },
           }),
-        ),
-      );
+        );
+      }
+
+      return deliveries;
     });
   },
   listDueDeliveries(now: Date, take: number) {
