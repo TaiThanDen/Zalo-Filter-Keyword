@@ -11,6 +11,7 @@ export const IMPLEMENTATION_DEFAULTS = {
   textNormalizationForm: "NFKC" as const,
   dedupeFingerprintBucketMs: 60_000,
   duplicateWindowMs: 300_000,
+  notificationCrossGroupDedupeWindowMs: 120_000,
   sessionTtlMs: 1000 * 60 * 60 * 24 * 7,
   watcherStatusThresholdsMs: {
     online: 60_000,
@@ -36,3 +37,4 @@ export const ROUTES = {
   logs: "/logs",
   watchers: "/watchers",
 };
+

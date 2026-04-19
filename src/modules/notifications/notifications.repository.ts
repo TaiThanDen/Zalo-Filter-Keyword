@@ -160,10 +160,10 @@ export const notificationsRepository = {
         },
       });
       const duplicateWindowStart = new Date(
-        currentMatchLog.inboundMessage.messageTime.getTime() - IMPLEMENTATION_DEFAULTS.duplicateWindowMs,
+        currentMatchLog.inboundMessage.messageTime.getTime() - IMPLEMENTATION_DEFAULTS.notificationCrossGroupDedupeWindowMs,
       );
       const duplicateWindowEnd = new Date(
-        currentMatchLog.inboundMessage.messageTime.getTime() + IMPLEMENTATION_DEFAULTS.duplicateWindowMs,
+        currentMatchLog.inboundMessage.messageTime.getTime() + IMPLEMENTATION_DEFAULTS.notificationCrossGroupDedupeWindowMs,
       );
       const channels = await tx.notificationChannel.findMany({
         where: { isActive: true },
@@ -311,3 +311,4 @@ export const notificationsRepository = {
     });
   },
 };
+
