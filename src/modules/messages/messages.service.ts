@@ -18,6 +18,17 @@ function toRuleSnapshot(rule: {
   };
 }
 
+function isInboundExternalIdConflict(error: unknown) {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError
+    && error.code === "P2002"
+    && Array.isArray(error.meta?.target)
+    && error.meta.target.includes("source")
+    && error.meta.target.includes("groupExternalId")
+    && error.meta.target.includes("messageExternalId")
+  );
+}
+
 export async function ingestInboundMessage(
   watcher: Watcher,
   payload: {
@@ -55,7 +66,6 @@ export async function ingestInboundMessage(
         source: payload.source,
         groupExternalId: payload.groupExternalId,
         messageExternalId: payload.messageExternalId,
-        messageTime,
       })
     : await messagesRepository.findPotentialDuplicateByFingerprint({
         fingerprint,
@@ -70,21 +80,45 @@ export async function ingestInboundMessage(
     rules: group.groupRules.map((groupRule) => groupRule.rule),
   });
 
-  const inboundMessage = await messagesRepository.createInboundMessage({
-    source: payload.source,
-    watcherId: watcher.id,
-    groupId: group.id,
-    groupExternalId: payload.groupExternalId,
-    groupName: payload.groupName ?? null,
-    messageExternalId: payload.messageExternalId ?? null,
-    senderExternalId: payload.senderExternalId ?? null,
-    senderName: payload.senderName ?? null,
-    messageText: payload.messageText,
-    normalizedText,
-    messageTime,
-    fingerprint,
-    rawPayload: payload.rawPayload,
-  });
+  let inboundMessage;
+
+  try {
+    inboundMessage = await messagesRepository.createInboundMessage({
+      source: payload.source,
+      watcherId: watcher.id,
+      groupId: group.id,
+      groupExternalId: payload.groupExternalId,
+      groupName: payload.groupName ?? null,
+      messageExternalId: payload.messageExternalId ?? null,
+      senderExternalId: payload.senderExternalId ?? null,
+      senderName: payload.senderName ?? null,
+      messageText: payload.messageText,
+      normalizedText,
+      messageTime,
+      fingerprint,
+      rawPayload: payload.rawPayload,
+    });
+  } catch (error) {
+    if (!payload.messageExternalId || !isInboundExternalIdConflict(error)) {
+      throw error;
+    }
+
+    const existingInbound = await messagesRepository.findBySourceGroupAndExternalId({
+      source: payload.source,
+      groupExternalId: payload.groupExternalId,
+      messageExternalId: payload.messageExternalId,
+    });
+
+    return {
+      accepted: true,
+      inboundMessageId: existingInbound?.id ?? null,
+      decision: existingInbound?.matchLog?.decision ?? MatchDecision.REJECTED_DUPLICATE,
+      reason: existingInbound?.matchLog?.reason ?? "duplicate_message",
+      matchedIncludeRules: [],
+      matchedExcludeRules: [],
+      notificationDeliveriesCreated: 0,
+    };
+  }
 
   const matchLog = await messagesRepository.createMatchLog({
     inboundMessageId: inboundMessage.id,

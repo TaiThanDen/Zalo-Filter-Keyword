@@ -154,6 +154,7 @@ model InboundMessage {
   @@index([groupExternalId, messageTime])
   @@index([fingerprint])
   @@index([messageExternalId])
+  @@unique([source, groupExternalId, messageExternalId])
 }
 
 model MatchLog {
@@ -211,4 +212,5 @@ model NotificationDelivery {
 
   @@index([status, nextRetryAt])
   @@index([notificationChannelId, status])
+  @@unique([matchLogId, notificationChannelId])
 }

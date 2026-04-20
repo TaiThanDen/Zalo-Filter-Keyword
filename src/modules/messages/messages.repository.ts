@@ -3,21 +3,33 @@ import { IMPLEMENTATION_DEFAULTS } from "@/src/config/constants";
 import { db } from "@/src/lib/db";
 
 export const messagesRepository = {
-  findPotentialDuplicateByExternalId(input: {
+  findBySourceGroupAndExternalId(input: {
     source: string;
     groupExternalId: string;
     messageExternalId: string;
-    messageTime: Date;
   }) {
     return db.inboundMessage.findFirst({
       where: {
         source: input.source,
         groupExternalId: input.groupExternalId,
         messageExternalId: input.messageExternalId,
-        messageTime: {
-          gte: new Date(input.messageTime.getTime() - IMPLEMENTATION_DEFAULTS.duplicateWindowMs),
-          lte: new Date(input.messageTime.getTime() + IMPLEMENTATION_DEFAULTS.duplicateWindowMs),
-        },
+      },
+      include: {
+        matchLog: true,
+      },
+      orderBy: { createdAt: "desc" },
+    });
+  },
+  findPotentialDuplicateByExternalId(input: {
+    source: string;
+    groupExternalId: string;
+    messageExternalId: string;
+  }) {
+    return db.inboundMessage.findFirst({
+      where: {
+        source: input.source,
+        groupExternalId: input.groupExternalId,
+        messageExternalId: input.messageExternalId,
       },
       orderBy: { createdAt: "desc" },
     });

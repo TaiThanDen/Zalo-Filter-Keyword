@@ -65,6 +65,16 @@ function buildNotificationSenderWhere(input: {
   };
 }
 
+function isDeliveryChannelConflict(error: unknown) {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError
+    && error.code === 'P2002'
+    && Array.isArray(error.meta?.target)
+    && error.meta.target.includes('matchLogId')
+    && error.meta.target.includes('notificationChannelId')
+  );
+}
+
 export const notificationsRepository = {
   listChannels() {
     return db.notificationChannel.findMany({
@@ -229,15 +239,21 @@ export const notificationsRepository = {
           continue;
         }
 
-        deliveries.push(
-          await tx.notificationDelivery.create({
-            data: {
-              matchLogId: data.matchLogId,
-              notificationChannelId: channel.id,
-              payload: data.payload,
-            },
-          }),
-        );
+        try {
+          deliveries.push(
+            await tx.notificationDelivery.create({
+              data: {
+                matchLogId: data.matchLogId,
+                notificationChannelId: channel.id,
+                payload: data.payload,
+              },
+            }),
+          );
+        } catch (error) {
+          if (!isDeliveryChannelConflict(error)) {
+            throw error;
+          }
+        }
       }
 
       return deliveries;
@@ -311,4 +327,5 @@ export const notificationsRepository = {
     });
   },
 };
+
 

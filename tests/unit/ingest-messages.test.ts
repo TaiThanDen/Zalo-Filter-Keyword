@@ -277,3 +277,98 @@ test("ensureDiscoveredGroup falls back to existing group on unique conflict with
   assert.equal(result.group.name, "Fresh name from payload");
 });
 
+
+test("ingest suppresses duplicate external-id races without scheduling a second alert", { concurrency: false }, async (t) => {
+  const restore: Array<() => void> = [];
+  t.after(() => {
+    while (restore.length > 0) {
+      restore.pop()?.();
+    }
+  });
+
+  const ensuredGroup = {
+    id: "group-1",
+    source: "zalo",
+    externalId: "group-001",
+    name: "PB Support Group",
+    isEnabled: true,
+    watcherId: "watcher-1",
+    watcher: null,
+    groupRules: [
+      {
+        id: "group-rule-1",
+        groupId: "group-1",
+        ruleId: "rule-PB",
+        createdAt: new Date("2026-04-12T00:00:00.000Z"),
+        rule: createIncludeRule("PB"),
+      },
+    ],
+    inboundMessages: [],
+    createdAt: new Date("2026-04-12T00:00:00.000Z"),
+    updatedAt: new Date("2026-04-12T00:00:00.000Z"),
+  } as unknown as EnsuredGroup;
+
+  let matchLogCalled = false;
+  let deliveriesCalled = false;
+
+  restore.push(
+    stubMethod(groupsRepository, "ensureDiscoveredGroup", async () => ({
+      group: ensuredGroup,
+      created: false,
+      updated: false,
+    })),
+  );
+  restore.push(
+    stubMethod(messagesRepository, "findPotentialDuplicateByExternalId", async () => null),
+  );
+  restore.push(
+    stubMethod(messagesRepository, "findPotentialDuplicateByFingerprint", async () => null),
+  );
+  restore.push(
+    stubMethod(messagesRepository, "createInboundMessage", async () => {
+      throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
+        code: "P2002",
+        clientVersion: "test",
+        meta: { target: ["source", "groupExternalId", "messageExternalId"] },
+      });
+    }),
+  );
+  restore.push(
+    stubMethod(messagesRepository, "findBySourceGroupAndExternalId", async () => ({
+      id: "existing-inbound",
+      matchLog: {
+        decision: MatchDecision.MATCHED,
+        reason: "matched",
+      },
+    })),
+  );
+  restore.push(
+    stubMethod(messagesRepository, "createMatchLog", async () => {
+      matchLogCalled = true;
+      throw new Error("should not create a second match log");
+    }),
+  );
+  restore.push(
+    stubMethod(notificationsRepository, "createDeliveries", async () => {
+      deliveriesCalled = true;
+      throw new Error("should not create duplicate deliveries");
+    }),
+  );
+
+  const result = await ingestInboundMessage(createWatcher(), {
+    source: "zalo",
+    groupExternalId: "group-001",
+    groupName: "PB Support Group",
+    messageExternalId: "msg-1",
+    senderName: "Alice",
+    messageText: "Can team PB support this ticket?",
+    messageTime: "2026-04-12T01:23:45.000Z",
+  });
+
+  assert.equal(result.inboundMessageId, "existing-inbound");
+  assert.equal(result.decision, MatchDecision.MATCHED);
+  assert.equal(result.reason, "matched");
+  assert.equal(result.notificationDeliveriesCreated, 0);
+  assert.equal(matchLogCalled, false);
+  assert.equal(deliveriesCalled, false);
+});

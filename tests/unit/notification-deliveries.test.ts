@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { Prisma } from '@prisma/client';
 import { db } from '@/src/lib/db';
 import { notificationsRepository } from '@/src/modules/notifications/notifications.repository';
 
@@ -223,3 +224,52 @@ test('createDeliveries suppresses duplicate Telegram alerts for same sender and 
   assert.deepEqual(createdChannelIds, ['channel-all']);
   assert.equal(deliveries.length, 1);
 });
+
+test('createDeliveries tolerates a race on the same matchLog/channel without creating a duplicate alert', async (t) => {
+  const restore: Array<() => void> = [];
+  t.after(() => {
+    while (restore.length > 0) {
+      restore.pop()?.();
+    }
+  });
+
+  const { tx, createdChannelIds } = createBaseTransactionState();
+  tx.notificationChannel.findMany = async () => [
+    {
+      id: 'channel-pb',
+      type: 'TELEGRAM',
+      config: { botToken: 'token-b', chatId: '-1002', parseMode: 'HTML' },
+      notificationChannelRules: [{ ruleId: 'rule-pb' }],
+    },
+  ];
+  tx.notificationDelivery.create = async () => {
+    throw new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+      code: 'P2002',
+      clientVersion: 'test',
+      meta: { target: ['matchLogId', 'notificationChannelId'] },
+    });
+  };
+
+  restore.push(
+    stubMethod(db, '$transaction', async (callback: unknown) => {
+      if (typeof callback !== 'function') {
+        throw new Error('Expected interactive transaction callback');
+      }
+
+      return (callback as (client: MockTransaction) => Promise<unknown>)(tx);
+    }),
+  );
+
+  const deliveries = await notificationsRepository.createDeliveries({
+    matchLogId: 'match-log-race',
+    payload: { matchedKeywords: ['pb'] },
+    matchedRuleIds: ['rule-pb'],
+  });
+
+  assert.deepEqual(createdChannelIds, []);
+  assert.equal(deliveries.length, 0);
+});
+
+
+
+
