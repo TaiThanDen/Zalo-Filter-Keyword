@@ -8,6 +8,14 @@ type TelegramConfig = {
   parseMode?: string;
 };
 
+function normalizeNotificationIdentity(value: string | null | undefined) {
+  return (value ?? '')
+    .normalize('NFKC')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 const notificationChannelWithRulesArgs = Prisma.validator<Prisma.NotificationChannelDefaultArgs>()({
   include: {
     notificationChannelRules: {
@@ -47,6 +55,23 @@ function dedupeRuleIds(ruleIds: string[]) {
   return Array.from(new Set(ruleIds));
 }
 
+function buildCrossGroupDeliveryLockKey(input: {
+  destinationKey: string;
+  source: string;
+  normalizedText: string;
+  senderExternalId?: string | null;
+  senderName?: string | null;
+}) {
+  const senderIdentity = normalizeNotificationIdentity(input.senderExternalId || input.senderName || 'unknown_sender');
+
+  return [
+    input.destinationKey,
+    input.source,
+    senderIdentity,
+    input.normalizedText,
+  ].join('|');
+}
+
 function buildNotificationSenderWhere(input: {
   senderExternalId?: string | null;
   senderName?: string | null;
@@ -56,7 +81,12 @@ function buildNotificationSenderWhere(input: {
   }
 
   if (input.senderName) {
-    return { senderName: input.senderName };
+    return {
+      senderName: {
+        equals: input.senderName,
+        mode: 'insensitive',
+      },
+    };
   }
 
   return {
@@ -206,12 +236,35 @@ export const notificationsRepository = {
         const currentKey = buildChannelDestinationKey(channel);
         return items.findIndex((candidate) => buildChannelDestinationKey(candidate) === currentKey) === index;
       });
+      const destinationChannelIdsByKey = new Map<string, string[]>();
+
+      for (const channel of matchingChannels) {
+        const destinationKey = buildChannelDestinationKey(channel);
+        const currentIds = destinationChannelIdsByKey.get(destinationKey) ?? [];
+        currentIds.push(channel.id);
+        destinationChannelIdsByKey.set(destinationKey, currentIds);
+      }
+
       const deliveries = [];
 
       for (const channel of dedupedChannels) {
+        const destinationKey = buildChannelDestinationKey(channel);
+        const destinationChannelIds = destinationChannelIdsByKey.get(destinationKey) ?? [channel.id];
+        const dedupeLockKey = buildCrossGroupDeliveryLockKey({
+          destinationKey,
+          source: currentMatchLog.inboundMessage.source,
+          normalizedText: currentMatchLog.inboundMessage.normalizedText,
+          senderExternalId: currentMatchLog.inboundMessage.senderExternalId,
+          senderName: currentMatchLog.inboundMessage.senderName,
+        });
+
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${dedupeLockKey}))`;
+
         const existingDelivery = await tx.notificationDelivery.findFirst({
           where: {
-            notificationChannelId: channel.id,
+            notificationChannelId: {
+              in: destinationChannelIds,
+            },
             status: {
               in: [
                 NotificationDeliveryStatus.PENDING,

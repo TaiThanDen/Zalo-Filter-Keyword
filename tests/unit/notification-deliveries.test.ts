@@ -20,6 +20,7 @@ type MockChannel = {
 };
 
 type MockTransaction = {
+  $queryRaw: (...args: unknown[]) => Promise<unknown>;
   matchLog: {
     findUniqueOrThrow: () => Promise<{
       inboundMessage: {
@@ -35,7 +36,7 @@ type MockTransaction = {
     findMany: () => Promise<MockChannel[]>;
   };
   notificationDelivery: {
-    findFirst: (input: { where: { notificationChannelId: string } }) => Promise<{ id: string } | null>;
+    findFirst: (input: { where: { notificationChannelId: string | { in: string[] } } }) => Promise<{ id: string } | null>;
     create: (input: { data: { notificationChannelId: string } }) => Promise<{ id: string }>;
   };
 };
@@ -44,6 +45,7 @@ function createBaseTransactionState() {
   const createdChannelIds: string[] = [];
 
   const tx: MockTransaction = {
+    $queryRaw: async () => [],
     matchLog: {
       findUniqueOrThrow: async () => ({
         inboundMessage: {
@@ -179,7 +181,7 @@ test('createDeliveries suppresses duplicate Telegram alerts for same sender and 
   });
 
   const { tx, createdChannelIds } = createBaseTransactionState();
-  const findFirstCalls: string[] = [];
+  const findFirstCalls: Array<string | { in: string[] }> = [];
   tx.notificationChannel.findMany = async () => [
     {
       id: 'channel-all',
@@ -194,10 +196,13 @@ test('createDeliveries suppresses duplicate Telegram alerts for same sender and 
       notificationChannelRules: [{ ruleId: 'rule-pg' }],
     },
   ];
-  tx.notificationDelivery.findFirst = async (input: { where: { notificationChannelId: string } }) => {
+  tx.notificationDelivery.findFirst = async (input: { where: { notificationChannelId: string | { in: string[] } } }) => {
     findFirstCalls.push(input.where.notificationChannelId);
 
-    if (input.where.notificationChannelId === 'channel-pg') {
+    if (
+      typeof input.where.notificationChannelId !== 'string'
+      && input.where.notificationChannelId.in.includes('channel-pg')
+    ) {
       return { id: 'delivery-existing' };
     }
 
@@ -220,7 +225,7 @@ test('createDeliveries suppresses duplicate Telegram alerts for same sender and 
     matchedRuleIds: ['rule-pg'],
   });
 
-  assert.deepEqual(findFirstCalls, ['channel-all', 'channel-pg']);
+  assert.deepEqual(findFirstCalls, [{ in: ['channel-all'] }, { in: ['channel-pg'] }]);
   assert.deepEqual(createdChannelIds, ['channel-all']);
   assert.equal(deliveries.length, 1);
 });

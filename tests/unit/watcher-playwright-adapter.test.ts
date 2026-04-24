@@ -1,8 +1,11 @@
-﻿import assert from 'node:assert/strict';
+import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  choosePreferredZaloPage,
   mergeDiscoveredGroups,
+  normalizeConversationCategoryLabel,
   parseStoredGroupCandidates,
+  sortConversationCategoriesForScan,
   type StoredGroupCandidate,
 } from '@/src/modules/watchers/source-adapters';
 
@@ -34,7 +37,7 @@ test('parseStoredGroupCandidates collects group ids from localStorage and archiv
   ]);
 });
 
-test('mergeDiscoveredGroups keeps visible names and appends stored-only groups without duplicates', () => {
+test('mergeDiscoveredGroups keeps visible names and still syncs stored-only groups with fallback ids', () => {
   const storedGroups: StoredGroupCandidate[] = [
     {
       externalId: 'g100',
@@ -82,4 +85,94 @@ test('mergeDiscoveredGroups keeps visible names and appends stored-only groups w
       name: 'g200',
     },
   ]);
+});
+
+test('mergeDiscoveredGroups prefers cached real names for stored-only groups when available', () => {
+  const groups = mergeDiscoveredGroups({
+    visibleSnapshots: [],
+    storedGroups: [
+      {
+        externalId: 'g200',
+        lastReceiveTs: 1775000000000,
+        isArchived: false,
+      },
+    ],
+    knownGroupNames: {
+      g200: 'Viec lam PG - Gia Khach',
+    },
+    limit: 10,
+    groupsOnly: true,
+  });
+
+  assert.deepEqual(groups, [
+    {
+      source: 'zalo',
+      externalId: 'g200',
+      name: 'Viec lam PG - Gia Khach',
+    },
+  ]);
+});
+
+test('choosePreferredZaloPage prefers active tabs with visible conversations', () => {
+  const preferred = choosePreferredZaloPage([
+    {
+      page: 'blocked-tab',
+      index: 0,
+      url: 'https://chat.zalo.me/',
+      title: 'Zalo',
+      rowCount: 0,
+      hasComposer: false,
+      activationPrompt: true,
+    },
+    {
+      page: 'active-tab',
+      index: 1,
+      url: 'https://chat.zalo.me/',
+      title: 'Zalo',
+      rowCount: 14,
+      hasComposer: true,
+      activationPrompt: false,
+    },
+  ]);
+
+  assert.equal(preferred?.page, 'active-tab');
+});
+
+test('choosePreferredZaloPage prefers composer when row counts tie', () => {
+  const preferred = choosePreferredZaloPage([
+    {
+      page: 'list-only',
+      index: 0,
+      url: 'https://chat.zalo.me/',
+      title: 'Zalo',
+      rowCount: 0,
+      hasComposer: false,
+      activationPrompt: false,
+    },
+    {
+      page: 'composer-ready',
+      index: 1,
+      url: 'https://chat.zalo.me/',
+      title: 'Zalo',
+      rowCount: 0,
+      hasComposer: true,
+      activationPrompt: false,
+    },
+  ]);
+
+  assert.equal(preferred?.page, 'composer-ready');
+});
+
+
+test('normalizeConversationCategoryLabel recognizes Vietnamese and English labels', () => {
+  assert.equal(normalizeConversationCategoryLabel('\u01afu ti\u00ean'), 'priority');
+  assert.equal(normalizeConversationCategoryLabel('Kh\u00e1c'), 'other');
+  assert.equal(normalizeConversationCategoryLabel('Priority'), 'priority');
+  assert.equal(normalizeConversationCategoryLabel('Other'), 'other');
+  assert.equal(normalizeConversationCategoryLabel('  Uu tien  '), 'priority');
+  assert.equal(normalizeConversationCategoryLabel('unknown'), null);
+});
+
+test('sortConversationCategoriesForScan prioritizes tab Kh\u00e1c and removes duplicates', () => {
+  assert.deepEqual(sortConversationCategoriesForScan(['priority', 'other', 'priority']), ['other', 'priority']);
 });
