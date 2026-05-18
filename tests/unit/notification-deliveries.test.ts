@@ -20,7 +20,7 @@ type MockChannel = {
 };
 
 type MockTransaction = {
-  $queryRaw: (...args: unknown[]) => Promise<unknown>;
+  $executeRaw: (...args: unknown[]) => Promise<unknown>;
   matchLog: {
     findUniqueOrThrow: () => Promise<{
       inboundMessage: {
@@ -45,7 +45,7 @@ function createBaseTransactionState() {
   const createdChannelIds: string[] = [];
 
   const tx: MockTransaction = {
-    $queryRaw: async () => [],
+    $executeRaw: async () => 1,
     matchLog: {
       findUniqueOrThrow: async () => ({
         inboundMessage: {

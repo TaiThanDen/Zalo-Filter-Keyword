@@ -258,7 +258,7 @@ export const notificationsRepository = {
           senderName: currentMatchLog.inboundMessage.senderName,
         });
 
-        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${dedupeLockKey}))`;
+        await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${dedupeLockKey}))`;
 
         const existingDelivery = await tx.notificationDelivery.findFirst({
           where: {
