@@ -4,7 +4,9 @@ import { logger } from "@/src/lib/logger";
 import {
   createSourceAdapter,
   type DiscoveredSourceGroup,
+  type SourceAdapter,
   type SourceMessageEvent,
+  type SourceRule,
 } from "@/src/modules/watchers/source-adapters";
 
 async function fetchConfig() {
@@ -32,6 +34,22 @@ function toSeedableGroups(config: unknown): DiscoveredSourceGroup[] {
       source: "zalo" as const,
       externalId: group.externalId as string,
       name: group.name as string,
+    }));
+}
+
+function toSeedableRules(config: unknown): SourceRule[] {
+  if (!config || typeof config !== "object" || !Array.isArray((config as { rules?: unknown[] }).rules)) {
+    return [];
+  }
+
+  return (config as { rules: Array<Record<string, unknown>> }).rules
+    .filter((rule) => typeof rule.id === "string" && typeof rule.pattern === "string")
+    .map((rule) => ({
+      id: rule.id as string,
+      type: rule.type === "EXCLUDE" ? "EXCLUDE" : "INCLUDE",
+      pattern: rule.pattern as string,
+      matchType: rule.matchType === "WHOLE_WORD" ? "WHOLE_WORD" : "CONTAINS",
+      caseSensitive: rule.caseSensitive === true,
     }));
 }
 
@@ -128,7 +146,11 @@ async function sendMessage(payload: SourceMessageEvent) {
   }
 }
 
-async function syncGroupsFromAdapter(adapter: ReturnType<typeof createSourceAdapter>) {
+function shouldSyncGroupsFromBrowser() {
+  return !env.WATCHER_PLAYWRIGHT_FAST_PREVIEW_ONLY && !env.WATCHER_PLAYWRIGHT_RULE_PREFILTER_ENABLED;
+}
+
+async function syncGroupsFromAdapter(adapter: SourceAdapter) {
   const groups = await adapter.listGroups();
 
   if (groups.length === 0) {
@@ -150,14 +172,20 @@ async function main() {
 
   const config = await fetchConfig();
   const seedableGroups = toSeedableGroups(config);
+  const seedableRules = toSeedableRules(config);
   await adapter.seedKnownGroups?.(seedableGroups);
+  await adapter.seedRules?.(seedableRules);
   logger.info("watcher_config_loaded", config);
-  logger.info("watcher_config_seeded", { groups: seedableGroups.length });
+  logger.info("watcher_config_seeded", { groups: seedableGroups.length, rules: seedableRules.length });
 
-  await syncGroupsFromAdapter(adapter);
+  if (shouldSyncGroupsFromBrowser()) {
+    await syncGroupsFromAdapter(adapter);
+  }
   await flushBuffer(sendMessage);
   await adapter.start(sendMessage);
-  await syncGroupsFromAdapter(adapter);
+  if (shouldSyncGroupsFromBrowser()) {
+    await syncGroupsFromAdapter(adapter);
+  }
 
   setInterval(() => {
     sendHeartbeat().catch((error) => {
@@ -169,18 +197,23 @@ async function main() {
 
   setInterval(() => {
     fetchConfig()
-      .then((config) => adapter.seedKnownGroups?.(toSeedableGroups(config)))
+      .then(async (config) => {
+        await adapter.seedKnownGroups?.(toSeedableGroups(config));
+        await adapter.seedRules?.(toSeedableRules(config));
+      })
       .catch((error) => {
       logger.warn("watcher_config_refresh_failed", {
         error: error instanceof Error ? error.message : String(error),
       });
       });
 
-    syncGroupsFromAdapter(adapter).catch((error) => {
-      logger.warn("watcher_group_sync_failed", {
-        error: error instanceof Error ? error.message : String(error),
+    if (shouldSyncGroupsFromBrowser()) {
+      syncGroupsFromAdapter(adapter).catch((error) => {
+        logger.warn("watcher_group_sync_failed", {
+          error: error instanceof Error ? error.message : String(error),
+        });
       });
-    });
+    }
   }, env.WATCHER_CONFIG_SYNC_INTERVAL_MS);
 }
 

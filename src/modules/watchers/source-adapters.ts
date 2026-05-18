@@ -24,11 +24,20 @@ export type DiscoveredSourceGroup = {
   name: string;
 };
 
+export type SourceRule = {
+  id: string;
+  type: 'INCLUDE' | 'EXCLUDE';
+  pattern: string;
+  matchType: 'CONTAINS' | 'WHOLE_WORD';
+  caseSensitive: boolean;
+};
+
 export type SourceAdapter = {
   start(onEvent: (event: SourceMessageEvent) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
   listGroups(): Promise<DiscoveredSourceGroup[]>;
   seedKnownGroups?(groups: DiscoveredSourceGroup[]): Promise<void>;
+  seedRules?(rules: SourceRule[]): Promise<void>;
 };
 
 export class MockAdapter implements SourceAdapter {
@@ -192,6 +201,31 @@ function buildMessageContentSignature(input: { conversationId: string; senderNam
   const senderIdentity = normalizeSearchLabel(input.senderName ?? 'unknown_sender');
   const messageIdentity = normalizeMessageFingerprintText(input.messageText);
   return sha256(`${conversationIdentity}|${senderIdentity}|${messageIdentity}`);
+}
+
+function escapeRulePattern(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function normalizeRuleText(value: string, caseSensitive: boolean) {
+  const normalized = value.normalize('NFKC').trim().replace(/\s+/g, ' ');
+  return caseSensitive ? normalized : normalized.toLowerCase();
+}
+
+function doesTextMatchRule(messageText: string, rule: SourceRule) {
+  const subject = normalizeRuleText(messageText, rule.caseSensitive);
+  const pattern = normalizeRuleText(rule.pattern, rule.caseSensitive);
+
+  if (!pattern) {
+    return false;
+  }
+
+  if (rule.matchType === 'CONTAINS') {
+    return subject.includes(pattern);
+  }
+
+  const expression = new RegExp(`(^|[^\\p{L}\\p{N}_])${escapeRulePattern(pattern)}([^\\p{L}\\p{N}_]|$)`, 'u');
+  return expression.test(subject);
 }
 
 function isRecoverablePlaywrightError(error: unknown) {
@@ -804,6 +838,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
   private stopped = false;
   private knownSignatures = new Map<string, string>();
   private knownGroupNames = new Map<string, string>();
+  private rules: SourceRule[] = [];
   private recentContentSignatures = new Map<string, number>();
   private loadedPersistedState = false;
   private consecutiveEmptySnapshotPolls = 0;
@@ -845,6 +880,10 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     if (changed) {
       await this.persistState();
     }
+  }
+
+  async seedRules(rules: SourceRule[]) {
+    this.rules = rules;
   }
 
   async listGroups() {
@@ -1795,8 +1834,10 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         '.text',
       ];
       const candidateTexts = await Promise.all([
-        ...candidateSelectors.map((selector) => bubble.locator(selector).first().innerText().catch(() => null)),
-        bubble.innerText().catch(() => null),
+        ...candidateSelectors.map((selector) =>
+          bubble.locator(selector).first().innerText({ timeout: 250 }).catch(() => null),
+        ),
+        bubble.innerText({ timeout: 500 }).catch(() => null),
       ]);
       const messageText = pickBestMessageTextCandidate(candidateTexts);
       if (!messageText) {
@@ -1804,7 +1845,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       }
 
       const senderName = normalizeSingleLineText(
-        await bubble.locator('.message-sender-name-content .truncate').first().textContent().catch(() => null),
+        await bubble.locator('.message-sender-name-content .truncate').first().textContent({ timeout: 250 }).catch(() => null),
       );
       return {
         messageText,
@@ -2108,6 +2149,20 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     return score;
   }
 
+  private shouldPrioritizeSnapshotByRules(snapshot: ConversationSnapshot) {
+    if (!env.WATCHER_PLAYWRIGHT_RULE_PREFILTER_ENABLED || this.rules.length === 0) {
+      return true;
+    }
+
+    const parsedPreview = parsePreview(snapshot.preview ?? '');
+    const text = parsedPreview.messageText || snapshot.preview || '';
+    const includeRules = this.rules.filter((rule) => rule.type === 'INCLUDE');
+    const excludeRules = this.rules.filter((rule) => rule.type === 'EXCLUDE');
+
+    return includeRules.some((rule) => doesTextMatchRule(text, rule)) &&
+      !excludeRules.some((rule) => doesTextMatchRule(text, rule));
+  }
+
   private getLiveSnapshotLimit() {
     return Math.min(env.WATCHER_PLAYWRIGHT_VISIBLE_ITEM_LIMIT, WATCHER_MAX_LIVE_SNAPSHOT_LIMIT);
   }
@@ -2118,8 +2173,10 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
 
   private async poll(onEvent: (event: SourceMessageEvent) => Promise<void>, isInitial: boolean) {
     const page = await this.ensurePage();
-    await this.clearConversationSearch(page);
-    await this.ensureRecentMessagesSynced(page);
+    if (!env.WATCHER_PLAYWRIGHT_FAST_PREVIEW_ONLY && !env.WATCHER_PLAYWRIGHT_RULE_PREFILTER_ENABLED) {
+      await this.clearConversationSearch(page);
+      await this.ensureRecentMessagesSynced(page);
+    }
     const liveSnapshotLimit = this.getLiveSnapshotLimit();
     const immediateConversationLimit = this.getImmediateConversationLimit();
 
@@ -2226,12 +2283,20 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       });
     }
 
-    const immediateCandidates = changedCandidates
-      .sort((left, right) => right.score - left.score || left.snapshot.visibleIndex - right.snapshot.visibleIndex)
-      .slice(0, immediateConversationLimit);
+    const sortedCandidates = changedCandidates.sort(
+      (left, right) => right.score - left.score || left.snapshot.visibleIndex - right.snapshot.visibleIndex,
+    );
+    const rulePrioritizedCandidates = sortedCandidates.filter((candidate) =>
+      this.shouldPrioritizeSnapshotByRules(candidate.snapshot),
+    );
+    const immediateCandidates = (rulePrioritizedCandidates.length > 0 ? rulePrioritizedCandidates : sortedCandidates).slice(
+      0,
+      immediateConversationLimit,
+    );
 
     logger.info('watcher_playwright_immediate_candidates_selected', {
       changedCandidates: changedCandidates.length,
+      rulePrioritizedCandidates: rulePrioritizedCandidates.length,
       immediateCandidates: immediateCandidates.length,
       staleCandidates,
       candidateGroups: immediateCandidates.map((candidate) => ({
@@ -2254,10 +2319,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         continue;
       }
 
-      this.knownSignatures.set(snapshot.animDataId, signature);
-      stateChanged = true;
-
-      if (snapshot.categoryKey && snapshot.categoryKey !== activeCategoryKey) {
+      if (!env.WATCHER_PLAYWRIGHT_FAST_PREVIEW_ONLY && snapshot.categoryKey && snapshot.categoryKey !== activeCategoryKey) {
         const switched = await this.switchConversationCategory(page, snapshot.categoryKey);
         if (switched) {
           activeCategoryKey = snapshot.categoryKey;
@@ -2265,7 +2327,17 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       }
 
       const parsedPreview = parsePreview(previewText);
-      const fullMessage = await this.readLatestConversationMessage(page, snapshot.animDataId, conversationName);
+      const fullMessage = env.WATCHER_PLAYWRIGHT_FAST_PREVIEW_ONLY
+        ? null
+        : await this.readLatestConversationMessage(page, snapshot.animDataId, conversationName);
+      if (!env.WATCHER_PLAYWRIGHT_FAST_PREVIEW_ONLY && !fullMessage) {
+        logger.warn('watcher_playwright_full_message_unavailable', {
+          conversationId: snapshot.animDataId,
+          conversationName,
+          visibleIndex: snapshot.visibleIndex,
+        });
+        continue;
+      }
       const resolvedMessageText =
         normalizePreservedMessageText(fullMessage?.messageText ?? null) ?? parsedPreview.messageText ?? previewText;
       const resolvedSenderName = fullMessage?.senderName ?? parsedPreview.senderName ?? undefined;
@@ -2274,6 +2346,9 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         senderName: resolvedSenderName,
         messageText: resolvedMessageText,
       });
+
+      this.knownSignatures.set(snapshot.animDataId, signature);
+      stateChanged = true;
 
       if (this.shouldSkipRecentContent(contentSignature)) {
         logger.info('watcher_playwright_recent_content_skipped', {
@@ -2298,7 +2373,8 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
           conversationName,
           preview: previewText,
           fullMessageText: fullMessage?.messageText ?? null,
-          fullMessageSource: fullMessage ? 'bubble' : 'preview',
+          fullMessageSource: fullMessage ? 'bubble' : env.WATCHER_PLAYWRIGHT_FAST_PREVIEW_ONLY ? 'sidebar_preview_fast' : 'preview',
+          fastPreviewOnly: env.WATCHER_PLAYWRIGHT_FAST_PREVIEW_ONLY,
           timeLabel: snapshot.timeLabel,
           unread: snapshot.unread,
           visibleIndex: snapshot.visibleIndex,
@@ -2316,7 +2392,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
   }
 }
 
-export function createSourceAdapter(mode: 'mock' | 'adapter') {
+export function createSourceAdapter(mode: 'mock' | 'adapter'): SourceAdapter {
   return mode === 'mock' ? new MockAdapter() : new PlaywrightConversationListAdapter();
 }
 
