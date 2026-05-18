@@ -1779,6 +1779,10 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     );
 
     if ((await row.count()) === 0) {
+      await this.ensureConversationRowVisible(page, conversationId);
+    }
+
+    if ((await row.count()) === 0) {
       logger.info('watcher_playwright_message_row_not_visible', {
         conversationId,
         conversationName: conversationName ?? null,
@@ -2289,14 +2293,25 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     const rulePrioritizedCandidates = sortedCandidates.filter((candidate) =>
       this.shouldPrioritizeSnapshotByRules(candidate.snapshot),
     );
-    const immediateCandidates = (rulePrioritizedCandidates.length > 0 ? rulePrioritizedCandidates : sortedCandidates).slice(
-      0,
-      immediateConversationLimit,
+    const rulePrioritizedIds = new Set(rulePrioritizedCandidates.map((candidate) => candidate.snapshot.animDataId));
+    const freshnessFallbackCandidates = sortedCandidates.filter(
+      (candidate) => !candidate.snapshot.animDataId || !rulePrioritizedIds.has(candidate.snapshot.animDataId),
     );
+    const freshnessReserve =
+      rulePrioritizedCandidates.length > 0 && freshnessFallbackCandidates.length > 0
+        ? Math.min(2, Math.max(1, immediateConversationLimit - 1))
+        : 0;
+    const selectedRuleCandidates = rulePrioritizedCandidates.slice(0, immediateConversationLimit - freshnessReserve);
+    const immediateCandidates = [
+      ...selectedRuleCandidates,
+      ...freshnessFallbackCandidates.slice(0, immediateConversationLimit - selectedRuleCandidates.length),
+    ];
 
     logger.info('watcher_playwright_immediate_candidates_selected', {
       changedCandidates: changedCandidates.length,
       rulePrioritizedCandidates: rulePrioritizedCandidates.length,
+      freshnessFallbackCandidates: freshnessFallbackCandidates.length,
+      freshnessReserve,
       immediateCandidates: immediateCandidates.length,
       staleCandidates,
       candidateGroups: immediateCandidates.map((candidate) => ({
