@@ -28,6 +28,7 @@ export type SourceAdapter = {
   start(onEvent: (event: SourceMessageEvent) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
   listGroups(): Promise<DiscoveredSourceGroup[]>;
+  seedKnownGroups?(groups: DiscoveredSourceGroup[]): Promise<void>;
 };
 
 export class MockAdapter implements SourceAdapter {
@@ -56,6 +57,8 @@ export class MockAdapter implements SourceAdapter {
 
     return Array.from(groups.values());
   }
+
+  async seedKnownGroups() {}
 }
 
 type ConversationSnapshot = {
@@ -64,6 +67,7 @@ type ConversationSnapshot = {
   preview: string | null;
   timeLabel: string | null;
   unread: boolean;
+  visibleIndex: number;
   categoryKey?: ConversationCategoryKey | null;
 };
 
@@ -84,6 +88,13 @@ type RawConversationSnapshot = {
   previewRaw: string | null;
   timeLabelRaw: string | null;
   unread: boolean;
+  visibleIndex: number;
+};
+
+type ScrollMetrics = {
+  scrollTop: number;
+  clientHeight: number;
+  scrollHeight: number;
 };
 
 export type ZaloPageCandidate<TPage = unknown> = {
@@ -113,7 +124,18 @@ const LAST_RECEIVE_TS_KEY = /^0_(g[^_]+)_lastReceiveTs$/;
 const ARCHIVED_CHAT_KEY_SUFFIX = '__archived_chat';
 const WATCHER_MANAGED_PAGE_SESSION_KEY = '__zalo_watcher_managed';
 const WATCHER_CONTENT_DEDUPE_WINDOW_MS = 120_000;
+const WATCHER_REALTIME_MAX_MESSAGE_AGE_MS = 10 * 60_000;
 const CONVERSATION_CATEGORY_SCAN_ORDER: ConversationCategoryKey[] = ['other', 'priority'];
+const WATCHER_MAX_LIVE_SNAPSHOT_LIMIT = 80;
+const CONVERSATION_ROW_SELECTOR =
+  '#conversationList .msg-item[data-id="div_TabMsg_ThrdChItem"], ' +
+  '#conversationList .msg-item[anim-data-id], ' +
+  '#conversationList .msg-item, ' +
+  '#searchResultList .msg-item[data-id="div_TabMsg_ThrdChItem"], ' +
+  '#searchResultList .msg-item[anim-data-id], ' +
+  '#searchResultList .msg-item, ' +
+  '.conv-list .conv-item[anim-data-id], ' +
+  '.conv-list .conv-item';
 
 const CONVERSATION_CATEGORY_LABELS: Record<ConversationCategoryKey, string[]> = {
   priority: ['\u01afu ti\u00ean', 'Uu tien', 'Priority'],
@@ -165,10 +187,11 @@ function normalizeMessageFingerprintText(value: string) {
   return value.normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-function buildMessageContentSignature(input: { senderName?: string; messageText: string }) {
+function buildMessageContentSignature(input: { conversationId: string; senderName?: string; messageText: string }) {
+  const conversationIdentity = normalizeSearchLabel(input.conversationId);
   const senderIdentity = normalizeSearchLabel(input.senderName ?? 'unknown_sender');
   const messageIdentity = normalizeMessageFingerprintText(input.messageText);
-  return sha256(`${senderIdentity}|${messageIdentity}`);
+  return sha256(`${conversationIdentity}|${senderIdentity}|${messageIdentity}`);
 }
 
 function isRecoverablePlaywrightError(error: unknown) {
@@ -245,6 +268,51 @@ function normalizePreservedMessageText(value: string | null) {
   return normalized || null;
 }
 
+function scoreMessageTextCandidate(value: string | null) {
+  const normalized = normalizePreservedMessageText(value);
+  if (!normalized) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  let score = normalized.length;
+  const compact = normalized.replace(/\s+/g, '');
+  const lines = normalized.split('\n').map((line) => line.trim()).filter(Boolean);
+  const reactionLikeLines = lines.filter((line) => {
+    const denseLine = line.replace(/\s+/g, '');
+    return denseLine.length <= 24 && /^[/:;()\-<>=+._a-z0-9]+$/i.test(denseLine) && /[:/()\-]/.test(denseLine);
+  });
+
+  if (normalized.includes('\n')) {
+    score += 24;
+  }
+
+  if (normalized.endsWith('...') || normalized.endsWith('…')) {
+    score -= 18;
+  }
+
+  if (compact.length <= 3) {
+    score -= 40;
+  }
+
+  if (reactionLikeLines.length > 0 && reactionLikeLines.length === lines.length) {
+    score -= 120;
+  }
+
+  return score;
+}
+
+export function pickBestMessageTextCandidate(values: Array<string | null | undefined>) {
+  const candidates = values
+    .map((value) => normalizePreservedMessageText(value ?? null))
+    .filter((value): value is string => Boolean(value));
+
+  if (candidates.length === 0) {
+    return null;
+  }
+
+  return candidates.sort((left, right) => scoreMessageTextCandidate(right) - scoreMessageTextCandidate(left))[0] ?? null;
+}
+
 function toConversationSnapshot(raw: RawConversationSnapshot): ConversationSnapshot {
   return {
     animDataId: raw.animDataId,
@@ -252,6 +320,7 @@ function toConversationSnapshot(raw: RawConversationSnapshot): ConversationSnaps
     preview: normalizeMultilineText(raw.previewRaw),
     timeLabel: normalizeSingleLineText(raw.timeLabelRaw),
     unread: raw.unread,
+    visibleIndex: raw.visibleIndex,
   };
 }
 
@@ -312,13 +381,12 @@ function buildVietnamIso(hours: number, minutes: number, now = new Date()) {
   return new Date(Date.UTC(year, month - 1, day, utcHours, minutes, 0, 0)).toISOString();
 }
 
-function resolveMessageTime(timeLabel: string | null) {
+function resolveMessageTime(timeLabel: string | null, now = new Date()) {
   if (!timeLabel) {
-    return new Date().toISOString();
+    return now.toISOString();
   }
 
   const normalized = timeLabel.toLowerCase().trim();
-  const now = new Date();
 
   if (!normalized || normalized.includes('vừa xong') || normalized.includes('just now')) {
     return now.toISOString();
@@ -354,6 +422,39 @@ function resolveMessageTime(timeLabel: string | null) {
   }
 
   return now.toISOString();
+}
+
+function resolveSnapshotActivityTimeMs(
+  input: {
+    timeLabel: string | null;
+    lastReceiveTs: number | null;
+  },
+  now = Date.now(),
+) {
+  if (typeof input.lastReceiveTs === 'number' && Number.isFinite(input.lastReceiveTs) && input.lastReceiveTs > 0) {
+    return input.lastReceiveTs;
+  }
+
+  const resolved = Date.parse(resolveMessageTime(input.timeLabel, new Date(now)));
+  if (Number.isFinite(resolved)) {
+    return resolved;
+  }
+
+  return now;
+}
+
+export function isFreshSnapshotActivityTime(
+  input: {
+    timeLabel: string | null;
+    lastReceiveTs: number | null;
+  },
+  now = Date.now(),
+  maxAgeMs = WATCHER_REALTIME_MAX_MESSAGE_AGE_MS,
+) {
+  const activityAtMs = resolveSnapshotActivityTimeMs(input, now);
+  const ageMs = now - activityAtMs;
+
+  return ageMs >= -60_000 && ageMs <= maxAgeMs;
 }
 
 export function choosePreferredZaloPage<TPage>(candidates: ZaloPageCandidate<TPage>[]) {
@@ -499,14 +600,14 @@ export function mergeDiscoveredGroups(input: {
 const readVisibleSnapshotsFn = new Function(
   'rows',
   `
-  return rows.map(function (item) {
+  return rows.map(function (item, index) {
     var row = item;
     var previewRoot =
-      row.querySelector('.conv-item-body') ||
-      row.querySelector('.conv-item-body__main') ||
       row.querySelector('.z-conv-message__preview-message') ||
       row.querySelector('.z-conv-message') ||
-      row.querySelector('.conv-message');
+      row.querySelector('.conv-message') ||
+      row.querySelector('.conv-item-body__main') ||
+      row.querySelector('.conv-item-body');
     var rawPreview = null;
 
     if (previewRoot) {
@@ -526,17 +627,173 @@ const readVisibleSnapshotsFn = new Function(
       previewRaw: rawPreview,
       timeLabelRaw: timeNode ? timeNode.textContent || null : null,
       unread: Boolean(unreadNode),
+      visibleIndex: index,
     };
   });
 `,
 ) as (rows: Element[]) => RawConversationSnapshot[];
 
-const readScrollTopFn = new Function('node', 'return node.scrollTop;') as (node: Element) => number;
+const readScrollTopFn = new Function(
+  'node',
+  `
+  var target = node;
+  var current = node;
+
+  for (var depth = 0; depth < 4 && current; depth += 1) {
+    var parent = current.parentElement;
+    if (!parent) {
+      break;
+    }
+
+    var style = window.getComputedStyle(parent);
+    var canScroll =
+      parent.scrollHeight > parent.clientHeight + 8 &&
+      (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowY === 'overlay');
+
+    if (canScroll) {
+      target = parent;
+      break;
+    }
+
+    current = parent;
+  }
+
+  return target.scrollTop;
+`,
+) as (node: Element) => number;
+const readScrollMetricsFn = new Function(
+  'node',
+  `
+  var target = node;
+  var current = node;
+
+  for (var depth = 0; depth < 4 && current; depth += 1) {
+    var parent = current.parentElement;
+    if (!parent) {
+      break;
+    }
+
+    var style = window.getComputedStyle(parent);
+    var canScroll =
+      parent.scrollHeight > parent.clientHeight + 8 &&
+      (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowY === 'overlay');
+
+    if (canScroll) {
+      target = parent;
+      break;
+    }
+
+    current = parent;
+  }
+
+  return {
+    scrollTop: target.scrollTop,
+    clientHeight: target.clientHeight,
+    scrollHeight: target.scrollHeight,
+  };
+`,
+) as (node: Element) => ScrollMetrics;
+const scrollConversationListToTopFn = new Function(
+  'node',
+  `
+  var target = node;
+  var current = node;
+
+  for (var depth = 0; depth < 4 && current; depth += 1) {
+    var parent = current.parentElement;
+    if (!parent) {
+      break;
+    }
+
+    var style = window.getComputedStyle(parent);
+    var canScroll =
+      parent.scrollHeight > parent.clientHeight + 8 &&
+      (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowY === 'overlay');
+
+    if (canScroll) {
+      target = parent;
+      break;
+    }
+
+    current = parent;
+  }
+
+  target.scrollTop = 0;
+  return {
+    scrollTop: target.scrollTop,
+    clientHeight: target.clientHeight,
+    scrollHeight: target.scrollHeight,
+  };
+`,
+) as (node: Element) => ScrollMetrics;
 const scrollConversationListFn = new Function(
   'node',
-  "node.scrollTop = Math.min(node.scrollTop + Math.max(node.clientHeight * 0.85, 240), node.scrollHeight);",
-) as (node: Element) => void;
-const restoreScrollTopFn = new Function('node', 'scrollTop', 'node.scrollTop = scrollTop;') as (node: Element, scrollTop: number) => void;
+  `
+  var target = node;
+  var current = node;
+
+  for (var depth = 0; depth < 4 && current; depth += 1) {
+    var parent = current.parentElement;
+    if (!parent) {
+      break;
+    }
+
+    var style = window.getComputedStyle(parent);
+    var canScroll =
+      parent.scrollHeight > parent.clientHeight + 8 &&
+      (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowY === 'overlay');
+
+    if (canScroll) {
+      target = parent;
+      break;
+    }
+
+    current = parent;
+  }
+
+  var nextScrollTop = Math.min(
+    target.scrollTop + Math.max(target.clientHeight * 0.85, 240),
+    target.scrollHeight
+  );
+
+  target.scrollTop = nextScrollTop;
+
+  return {
+    scrollTop: target.scrollTop,
+    clientHeight: target.clientHeight,
+    scrollHeight: target.scrollHeight,
+  };
+`,
+) as (node: Element) => ScrollMetrics;
+const restoreScrollTopFn = new Function(
+  'node',
+  'scrollTop',
+  `
+  var target = node;
+  var current = node;
+
+  for (var depth = 0; depth < 4 && current; depth += 1) {
+    var parent = current.parentElement;
+    if (!parent) {
+      break;
+    }
+
+    var style = window.getComputedStyle(parent);
+    var canScroll =
+      parent.scrollHeight > parent.clientHeight + 8 &&
+      (style.overflowY === 'auto' || style.overflowY === 'scroll' || style.overflowY === 'overlay');
+
+    if (canScroll) {
+      target = parent;
+      break;
+    }
+
+    current = parent;
+  }
+
+  target.scrollTop = scrollTop;
+`,
+) as (node: Element, scrollTop: number) => void;
 
 export class PlaywrightConversationListAdapter implements SourceAdapter {
   private browser: Browser | null = null;
@@ -549,6 +806,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
   private knownGroupNames = new Map<string, string>();
   private recentContentSignatures = new Map<string, number>();
   private loadedPersistedState = false;
+  private consecutiveEmptySnapshotPolls = 0;
 
   async start(onEvent: (event: SourceMessageEvent) => Promise<void>) {
     this.stopped = false;
@@ -567,12 +825,36 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     await this.persistState();
   }
 
+  async seedKnownGroups(groups: DiscoveredSourceGroup[]) {
+    let changed = false;
+
+    for (const group of groups) {
+      const normalizedName = group.name?.trim();
+      if (!group.externalId || !normalizedName) {
+        continue;
+      }
+
+      if (this.knownGroupNames.get(group.externalId) === normalizedName) {
+        continue;
+      }
+
+      this.knownGroupNames.set(group.externalId, normalizedName);
+      changed = true;
+    }
+
+    if (changed) {
+      await this.persistState();
+    }
+  }
+
   async listGroups() {
     return this.runSerialized(async () =>
       this.withRecoveredBrowser('list_groups', async () => {
         const page = await this.ensurePage();
+        await this.clearConversationSearch(page);
+        await this.ensureRecentMessagesSynced(page);
         const [snapshots, storedGroups] = await Promise.all([
-          this.collectSnapshots(page, env.WATCHER_PLAYWRIGHT_GROUP_DISCOVERY_LIMIT),
+          this.collectTopSnapshots(page, env.WATCHER_PLAYWRIGHT_GROUP_DISCOVERY_LIMIT),
           this.readStoredGroupCandidates(page),
         ]);
         const namesChanged = this.rememberSnapshotNames(snapshots);
@@ -590,8 +872,10 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
 
         logger.info('watcher_playwright_group_discovery_completed', {
           visibleSnapshots: snapshots.length,
+          recoveredSnapshots: 0,
           storedGroups: storedGroups.length,
           totalGroups: groups.length,
+          mode: 'top_sidebar_plus_storage',
         });
 
         return groups;
@@ -643,17 +927,28 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       )
         .filter((item) => item.isManaged)
         .map((item) => item.candidate);
-      const preferredPage = choosePreferredZaloPage(managedCandidates);
+      const preferredManagedPage = choosePreferredZaloPage(managedCandidates);
+      const preferredExistingPage = choosePreferredZaloPage(pageCandidates);
 
-      if (preferredPage) {
-        this.page = preferredPage.page;
+      if (preferredManagedPage) {
+        this.page = preferredManagedPage.page;
         logger.info('watcher_playwright_page_selected', {
-          selectedIndex: preferredPage.index,
-          selectedRowCount: preferredPage.rowCount,
-          selectedHasComposer: preferredPage.hasComposer,
-          selectedActivationPrompt: preferredPage.activationPrompt,
+          selectedIndex: preferredManagedPage.index,
+          selectedRowCount: preferredManagedPage.rowCount,
+          selectedHasComposer: preferredManagedPage.hasComposer,
+          selectedActivationPrompt: preferredManagedPage.activationPrompt,
           totalZaloPages: pageCandidates.length,
           selectionSource: 'managed_page',
+        });
+      } else if (preferredExistingPage) {
+        this.page = preferredExistingPage.page;
+        logger.info('watcher_playwright_page_selected', {
+          selectedIndex: preferredExistingPage.index,
+          selectedRowCount: preferredExistingPage.rowCount,
+          selectedHasComposer: preferredExistingPage.hasComposer,
+          selectedActivationPrompt: preferredExistingPage.activationPrompt,
+          totalZaloPages: pageCandidates.length,
+          selectionSource: 'existing_page_fallback',
         });
       } else {
         this.page = await this.createManagedPage();
@@ -679,6 +974,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       await this.page.waitForTimeout(5_000);
     }
 
+    await this.clearConversationSearch(this.page);
     await this.markWatcherManagedPage(this.page);
 
     logger.info('watcher_playwright_attached', {
@@ -771,9 +1067,10 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       .innerText()
       .then((value) => value.slice(0, 300))
       .catch(() => '');
+    const normalizedBodyText = normalizeSearchLabel(bodyText);
 
     const rowCount = await page
-      .locator('#conversationList .msg-item[data-id="div_TabMsg_ThrdChItem"]')
+      .locator(CONVERSATION_ROW_SELECTOR)
       .count()
       .catch(() => 0);
 
@@ -790,7 +1087,11 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       title: await page.title().catch(() => ''),
       rowCount,
       hasComposer,
-      activationPrompt: rowCount === 0 && !hasComposer && bodyText.includes('Tab') && bodyText.includes('Zalo'),
+      activationPrompt:
+        (rowCount === 0 && !hasComposer && bodyText.includes('Tab') && bodyText.includes('Zalo')) ||
+        normalizedBodyText.includes('ban dang mo zalo tren mot tab khac') ||
+        normalizedBodyText.includes('nhan kich hoat de su dung tren tab nay') ||
+        normalizedBodyText.includes('dang dang nhap'),
     } satisfies ZaloPageCandidate<Page>;
   }
 
@@ -808,6 +1109,377 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       .catch(() => false);
   }
 
+  private async ensureRecentMessagesSynced(page: Page) {
+    const directSyncButton = page
+      .getByText(/nhấn để đồng bộ ngay/i)
+      .or(page.getByText(/đồng bộ ngay/i))
+      .first();
+
+    if ((await directSyncButton.count().catch(() => 0)) > 0) {
+      const clicked = await directSyncButton
+        .click({ timeout: 2_500 })
+        .then(() => true)
+        .catch(() => false);
+
+      if (clicked) {
+        logger.info('watcher_playwright_recent_sync_requested', {
+          source: 'playwright_locator',
+        });
+        await page.waitForTimeout(1_200);
+      }
+    }
+
+    const syncInfo = await page
+      .evaluate(() => {
+        const normalize = (value: string | null) =>
+          (value ?? '')
+            .normalize('NFD')
+            .replace(/\p{Diacritic}/gu, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+
+        const bodyText = normalize(document.body.innerText);
+        const hasSyncBanner =
+          bodyText.includes('dong bo tin nhan gan day') && bodyText.includes('dong bo ngay');
+
+        if (!hasSyncBanner) {
+          return {
+            triggered: false,
+            hasSyncBanner: false,
+          };
+        }
+
+        const candidates = Array.from(document.querySelectorAll('button, a, [role="button"], span, div'));
+        for (const candidate of candidates) {
+          const label = normalize(candidate.textContent);
+          if (!label.includes('dong bo ngay')) {
+            continue;
+          }
+
+          (candidate as HTMLElement).click();
+          return {
+            triggered: true,
+            hasSyncBanner: true,
+          };
+        }
+
+        return {
+          triggered: false,
+          hasSyncBanner: true,
+        };
+      })
+      .catch(() => ({
+        triggered: false,
+        hasSyncBanner: false,
+      }));
+
+    if (!syncInfo.hasSyncBanner) {
+      return false;
+    }
+
+    if (syncInfo.triggered) {
+      logger.info('watcher_playwright_recent_sync_requested');
+    } else {
+      logger.warn('watcher_playwright_recent_sync_banner_detected_without_click_target');
+    }
+
+    await page.waitForTimeout(syncInfo.triggered ? 1_200 : 400);
+    await page
+      .waitForFunction(() => {
+        const normalize = (value: string | null) =>
+          (value ?? '')
+            .normalize('NFD')
+            .replace(/\p{Diacritic}/gu, '')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .toLowerCase();
+
+        const bodyText = normalize(document.body.innerText);
+        const rowSelectors = [
+          '#conversationList .msg-item[data-id="div_TabMsg_ThrdChItem"]',
+          '#conversationList .msg-item[anim-data-id]',
+          '#conversationList .msg-item',
+          '.conv-list .conv-item[anim-data-id]',
+          '.conv-list .conv-item',
+        ];
+        const rowCount = rowSelectors.reduce(
+          (maxCount, selector) => Math.max(maxCount, document.querySelectorAll(selector).length),
+          0,
+        );
+
+        return !bodyText.includes('dong bo tin nhan gan day') || rowCount > 12;
+      }, undefined, { timeout: 12_000 })
+      .catch(() => {});
+
+    return syncInfo.triggered;
+  }
+
+  private async clearConversationSearch(page: Page) {
+    const searchInput = page
+      .locator('#contact-search-input, input[data-id="txt_Main_Search"], input[type="search"]')
+      .first();
+    if ((await searchInput.count()) === 0) {
+      return false;
+    }
+
+    const forceClearSearchUi = async () =>
+      page
+        .evaluate(() => {
+          const normalize = (value: string | null) =>
+            (value ?? '')
+              .normalize('NFD')
+              .replace(/\p{Diacritic}/gu, '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .toLowerCase();
+
+          const input = document.querySelector<HTMLInputElement>(
+            '#contact-search-input, input[data-id="txt_Main_Search"], input[type="search"]',
+          );
+          if (input) {
+            input.focus();
+            input.value = '';
+            input.dispatchEvent(new Event('input', { bubbles: true }));
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+            input.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'Escape' }));
+            input.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true, key: 'Escape' }));
+            input.blur();
+          }
+
+          const clearSelectors = [
+            '#contact-search .fa-textbox-icon-clear',
+            '#contact-search .close-spinner',
+            '#contact-search [data-translate-inner="STR_CLOSE"]',
+            '#contact-search .z--btn--v2',
+            '#contact-search .btn-tertiary-neutral',
+          ];
+          for (const selector of clearSelectors) {
+            const element = document.querySelector<HTMLElement>(selector);
+            element?.click();
+          }
+
+          for (const candidate of Array.from(document.querySelectorAll<HTMLElement>('button, a, [role="button"], span, div'))) {
+            const label = normalize(candidate.textContent);
+            if (label === 'dong' || label === 'xoa') {
+              candidate.click();
+            }
+          }
+        })
+        .catch(() => {});
+
+    const readSearchState = async () =>
+      page
+        .evaluate(() => {
+          const normalize = (value: string | null) =>
+            (value ?? '')
+              .normalize('NFD')
+              .replace(/\p{Diacritic}/gu, '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .toLowerCase();
+
+          const input = document.querySelector<HTMLInputElement>(
+            '#contact-search-input, input[data-id="txt_Main_Search"], input[type="search"]',
+          );
+          const bodyText = normalize(document.body.innerText);
+          const rowSelectors = [
+            '#conversationList .msg-item[data-id="div_TabMsg_ThrdChItem"]',
+            '#conversationList .msg-item',
+            '#conversationList [anim-data-id]',
+            '.conv-list .conv-item',
+            '.conv-item[anim-data-id]',
+          ];
+          const rowCount = rowSelectors.reduce(
+            (maxCount, selector) => Math.max(maxCount, document.querySelectorAll(selector).length),
+            0,
+          );
+
+          return {
+            value: input?.value?.trim() ?? '',
+            rowCount,
+            hasSearchResultList: Boolean(document.querySelector('#searchResultList')),
+            hasSearchOverlay:
+              bodyText.includes('tat ca') &&
+              bodyText.includes('lien he') &&
+              bodyText.includes('tin nhan') &&
+              bodyText.includes('file') &&
+              bodyText.includes('dong'),
+          };
+        })
+        .catch(() => ({
+          value: '',
+          rowCount: 0,
+          hasSearchResultList: false,
+          hasSearchOverlay: false,
+        }));
+
+    const initialState = await readSearchState();
+
+    if (!initialState.value && !initialState.hasSearchOverlay && !initialState.hasSearchResultList) {
+      return false;
+    }
+
+    let finalState = initialState;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await searchInput.click({ timeout: 2_000 }).catch(() => {});
+      await page.keyboard.press(`${process.platform === 'win32' ? 'Control' : 'Meta'}+A`).catch(() => {});
+      await page.keyboard.press('Backspace').catch(() => {});
+      await page
+        .locator('#contact-search .fa-textbox-icon-clear, #contact-search .close-spinner')
+        .first()
+        .click({ force: true, timeout: 1_500 })
+        .catch(() => {});
+      await searchInput.fill('').catch(() => {});
+      await page.keyboard.press('Escape').catch(() => {});
+      await forceClearSearchUi();
+      await page
+        .locator('#contact-search [data-translate-inner="STR_CLOSE"]')
+        .first()
+        .click({ force: true, timeout: 1_500 })
+        .catch(() => {});
+      await page
+        .locator('#contact-search .z--btn--v2, #contact-search .btn-tertiary-neutral')
+        .first()
+        .click({ force: true, timeout: 1_500 })
+        .catch(() => {});
+      await page.waitForTimeout(350 * (attempt + 1));
+
+      finalState = await readSearchState();
+      if (!finalState.value && !finalState.hasSearchOverlay && !finalState.hasSearchResultList && finalState.rowCount > 0) {
+        logger.info('watcher_playwright_search_cleared', {
+          previousValue: initialState.value,
+          hadSearchOverlay: initialState.hasSearchOverlay,
+          attempts: attempt + 1,
+          finalRowCount: finalState.rowCount,
+        });
+        return true;
+      }
+    }
+
+    if (finalState.value || finalState.hasSearchOverlay || finalState.hasSearchResultList) {
+      await page.goto(env.WATCHER_ZALO_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {});
+      await page.waitForTimeout(2_000);
+      finalState = await readSearchState();
+
+      if (!finalState.value && !finalState.hasSearchOverlay && !finalState.hasSearchResultList && finalState.rowCount > 0) {
+        logger.info('watcher_playwright_search_cleared_via_reload', {
+          previousValue: initialState.value,
+          hadSearchOverlay: initialState.hasSearchOverlay,
+          finalRowCount: finalState.rowCount,
+        });
+        return true;
+      }
+    }
+
+    logger.warn('watcher_playwright_search_clear_incomplete', {
+      previousValue: initialState.value,
+      hadSearchOverlay: initialState.hasSearchOverlay,
+      finalRowCount: finalState.rowCount,
+      finalHasSearchOverlay: finalState.hasSearchOverlay,
+      finalHasSearchResultList: finalState.hasSearchResultList,
+      finalValue: finalState.value,
+    });
+    return true;
+  }
+
+  private async searchConversationSnapshot(page: Page, groupName: string) {
+    const normalizedTarget = normalizeSearchLabel(groupName);
+    if (!normalizedTarget) {
+      return null;
+    }
+
+    const searchInput = page
+      .locator('#contact-search-input, input[data-id="txt_Main_Search"], input[type="search"]')
+      .first();
+    if ((await searchInput.count()) === 0) {
+      return null;
+    }
+
+    await searchInput.click({ timeout: 2_000 }).catch(() => {});
+    await searchInput.fill(groupName);
+    await page
+      .waitForFunction(
+        () =>
+          document.querySelectorAll('#searchResultList .msg-item[anim-data-id], #searchResultList .conv-item[anim-data-id], #conversationList .msg-item[anim-data-id], .conv-list .conv-item[anim-data-id]').length > 0,
+        undefined,
+        { timeout: 1_500 },
+      )
+      .catch(() => {});
+    await page.waitForTimeout(250);
+
+    const visibleSnapshots = await this.readVisibleSnapshots(page);
+    const exactSnapshot =
+      visibleSnapshots.find((snapshot) => normalizeSearchLabel(snapshot.name) === normalizedTarget) ?? null;
+
+    if (exactSnapshot) {
+      return exactSnapshot;
+    }
+
+    return (
+      visibleSnapshots.find((snapshot) => {
+        const normalizedName = normalizeSearchLabel(snapshot.name);
+        return Boolean(
+          normalizedName &&
+            (normalizedName.includes(normalizedTarget) || normalizedTarget.includes(normalizedName)),
+        );
+      }) ?? null
+    );
+  }
+
+  private async collectSearchFallbackSnapshots(
+    page: Page,
+    storedGroups: StoredGroupCandidate[],
+    existingSnapshots: ConversationSnapshot[],
+    limit: number,
+  ) {
+    if (limit <= 0) {
+      return [] as ConversationSnapshot[];
+    }
+
+    const existingIds = new Set(existingSnapshots.map((snapshot) => snapshot.animDataId).filter(Boolean));
+    const candidates = storedGroups
+      .filter((group) => !existingIds.has(group.externalId))
+      .map((group) => ({
+        externalId: group.externalId,
+        lastReceiveTs: group.lastReceiveTs ?? 0,
+        name: this.knownGroupNames.get(group.externalId)?.trim() ?? '',
+      }))
+      .filter((group) => group.name)
+      .sort((left, right) => right.lastReceiveTs - left.lastReceiveTs)
+      .slice(0, limit);
+
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    const recoveredSnapshots: ConversationSnapshot[] = [];
+
+    try {
+      for (const candidate of candidates) {
+        const recoveredSnapshot = await this.searchConversationSnapshot(page, candidate.name);
+        if (!recoveredSnapshot?.animDataId || existingIds.has(recoveredSnapshot.animDataId)) {
+          continue;
+        }
+
+        recoveredSnapshots.push(recoveredSnapshot);
+        existingIds.add(recoveredSnapshot.animDataId);
+      }
+    } finally {
+      await this.clearConversationSearch(page);
+    }
+
+    if (recoveredSnapshots.length > 0) {
+      logger.info('watcher_playwright_search_fallback_completed', {
+        recoveredSnapshots: recoveredSnapshots.length,
+        attemptedCandidates: candidates.length,
+      });
+    }
+
+    return recoveredSnapshots;
+  }
+
   private async loadPersistedState() {
     try {
       const raw = await readFile(env.WATCHER_PLAYWRIGHT_STATE_FILE, 'utf8');
@@ -817,13 +1489,18 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         return;
       }
 
-      this.knownSignatures = new Map(Object.entries(parsed.knownSignatures));
-      this.knownGroupNames = new Map(
-        Object.entries(parsed.knownGroupNames ?? {}).filter((entry): entry is [string, string] => {
-          const [groupExternalId, name] = entry;
-          return Boolean(groupExternalId && typeof name === 'string' && name.trim());
-        }),
-      );
+      this.knownSignatures = new Map([
+        ...Object.entries(parsed.knownSignatures),
+        ...this.knownSignatures.entries(),
+      ]);
+
+      for (const [groupExternalId, name] of Object.entries(parsed.knownGroupNames ?? {})) {
+        if (!groupExternalId || typeof name !== 'string' || !name.trim() || this.knownGroupNames.has(groupExternalId)) {
+          continue;
+        }
+
+        this.knownGroupNames.set(groupExternalId, name.trim());
+      }
       this.loadedPersistedState = true;
       logger.info('watcher_state_loaded', {
         stateFile: env.WATCHER_PLAYWRIGHT_STATE_FILE,
@@ -859,7 +1536,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
 
   private async readVisibleSnapshots(page: Page) {
     const rawSnapshots = (await page.$$eval(
-      '#conversationList .msg-item[data-id="div_TabMsg_ThrdChItem"]',
+      CONVERSATION_ROW_SELECTOR,
       readVisibleSnapshotsFn,
     )) as RawConversationSnapshot[];
 
@@ -901,7 +1578,9 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         const getClickable = (element: HTMLElement) =>
           (element.closest('.tab-item, [role="tab"], button, a') as HTMLElement | null) ?? element;
         const candidates = Array.from(
-          document.querySelectorAll<HTMLElement>('.tab-item, [role="tab"], button, a, span, div'),
+          document.querySelectorAll<HTMLElement>(
+            '.msg-filters-bar .tab-item, .tab-main .tab-item, .msg-filters-bar [role="tab"], .tab-main [role="tab"]',
+          ),
         );
         const seen = new Set<ConversationCategoryKey>();
         const categories: ConversationCategoryDomItem[] = [];
@@ -959,7 +1638,9 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
             return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
           };
           const candidates = Array.from(
-            document.querySelectorAll<HTMLElement>('.tab-item, [role="tab"], button, a, span, div'),
+            document.querySelectorAll<HTMLElement>(
+              '.msg-filters-bar .tab-item, .tab-main .tab-item, .msg-filters-bar [role="tab"], .tab-main [role="tab"]',
+            ),
           );
 
           for (const candidate of candidates) {
@@ -991,15 +1672,78 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     return true;
   }
 
+  private async ensureConversationRowVisible(page: Page, conversationId: string) {
+    const rowSelector =
+      `#conversationList .msg-item[data-id="div_TabMsg_ThrdChItem"][anim-data-id="${conversationId}"], ` +
+      `#conversationList .msg-item[anim-data-id="${conversationId}"], ` +
+      `#searchResultList .msg-item[data-id="div_TabMsg_ThrdChItem"][anim-data-id="${conversationId}"], ` +
+      `#searchResultList .msg-item[anim-data-id="${conversationId}"], ` +
+      `.conv-list .conv-item[anim-data-id="${conversationId}"]`;
+    const row = page.locator(rowSelector);
+
+    if ((await row.count()) > 0) {
+      return true;
+    }
+
+    const conversationList = page.locator('#conversationList');
+    if ((await conversationList.count()) === 0) {
+      return false;
+    }
+
+    const originalScrollTop = await conversationList.evaluate(readScrollTopFn).catch(() => 0);
+    let found = false;
+
+    try {
+      await conversationList.evaluate(scrollConversationListToTopFn).catch(() => ({ scrollTop: 0, clientHeight: 0, scrollHeight: 0 }));
+      await page.waitForTimeout(150);
+
+      for (let pass = 0; pass < 20; pass += 1) {
+        if ((await row.count()) > 0) {
+          found = true;
+          logger.info('watcher_playwright_message_row_recovered_via_scroll', {
+            conversationId,
+            pass: pass + 1,
+          });
+          break;
+        }
+
+        const currentMetrics = await conversationList.evaluate(readScrollMetricsFn).catch(() => ({ scrollTop: 0, clientHeight: 0, scrollHeight: 0 }));
+        const reachedBottom = currentMetrics.scrollTop + currentMetrics.clientHeight >= currentMetrics.scrollHeight - 16;
+        const nextMetrics = await conversationList.evaluate(scrollConversationListFn).catch(() => currentMetrics);
+
+        await page.waitForTimeout(140);
+
+        if (Math.abs(nextMetrics.scrollTop - currentMetrics.scrollTop) <= 1 && reachedBottom) {
+          break;
+        }
+      }
+    } finally {
+      if (!found) {
+        await conversationList.evaluate(restoreScrollTopFn, originalScrollTop).catch(() => {});
+      }
+    }
+
+    return found;
+  }
+
   private async readLatestConversationMessage(
     page: Page,
     conversationId: string,
+    conversationName?: string | null,
   ): Promise<ConversationMessageDetails | null> {
     const row = page.locator(
-      `#conversationList .msg-item[data-id="div_TabMsg_ThrdChItem"][anim-data-id="${conversationId}"]`,
+      `#conversationList .msg-item[data-id="div_TabMsg_ThrdChItem"][anim-data-id="${conversationId}"], ` +
+        `#conversationList .msg-item[anim-data-id="${conversationId}"], ` +
+        `#searchResultList .msg-item[data-id="div_TabMsg_ThrdChItem"][anim-data-id="${conversationId}"], ` +
+        `#searchResultList .msg-item[anim-data-id="${conversationId}"], ` +
+        `.conv-list .conv-item[anim-data-id="${conversationId}"]`,
     );
 
     if ((await row.count()) === 0) {
+      logger.info('watcher_playwright_message_row_not_visible', {
+        conversationId,
+        conversationName: conversationName ?? null,
+      });
       return null;
     }
 
@@ -1007,13 +1751,17 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       await row.first().click({ force: true, timeout: 5_000 });
       await page
         .waitForFunction(
-          (rowSelector) => {
-            const activeRow = document.querySelector(rowSelector);
-            return Boolean(activeRow && /\b(active|selected)\b/i.test(activeRow.className));
-          },
-          `#conversationList .msg-item[data-id="div_TabMsg_ThrdChItem"][anim-data-id="${conversationId}"]`,
-          { timeout: 1_500 },
-        )
+            (rowSelector) => {
+              const activeRow = document.querySelector(rowSelector);
+              return Boolean(activeRow && /\b(active|selected)\b/i.test(activeRow.className));
+            },
+            `#conversationList .msg-item[data-id="div_TabMsg_ThrdChItem"][anim-data-id="${conversationId}"], ` +
+              `#conversationList .msg-item[anim-data-id="${conversationId}"], ` +
+              `#searchResultList .msg-item[data-id="div_TabMsg_ThrdChItem"][anim-data-id="${conversationId}"], ` +
+              `#searchResultList .msg-item[anim-data-id="${conversationId}"], ` +
+              `.conv-list .conv-item[anim-data-id="${conversationId}"]`,
+            { timeout: 1_500 },
+          )
         .catch(() => {});
     } catch {
       return null;
@@ -1038,16 +1786,19 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
 
       const candidateSelectors = [
         '[data-component="message-text-content"]',
+        '[data-component="message-content"]',
         '.text-message__container',
+        '.text-message',
         '.img-msg-v2__cap',
-        '.text',
+        '.link-message',
         '.msg-text',
-        '.message-action',
+        '.text',
       ];
-      const candidateTexts = await Promise.all(
-        candidateSelectors.map((selector) => bubble.locator(selector).first().innerText().catch(() => null)),
-      );
-      const messageText = candidateTexts.map((value) => normalizePreservedMessageText(value)).find(Boolean) ?? null;
+      const candidateTexts = await Promise.all([
+        ...candidateSelectors.map((selector) => bubble.locator(selector).first().innerText().catch(() => null)),
+        bubble.innerText().catch(() => null),
+      ]);
+      const messageText = pickBestMessageTextCandidate(candidateTexts);
       if (!messageText) {
         continue;
       }
@@ -1055,13 +1806,11 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       const senderName = normalizeSingleLineText(
         await bubble.locator('.message-sender-name-content .truncate').first().textContent().catch(() => null),
       );
-
       return {
         messageText,
         senderName: senderName || undefined,
       };
     }
-
     return null;
   }
   private async readStoredGroupCandidates(page: Page) {
@@ -1090,6 +1839,66 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     return parseStoredGroupCandidates(localStorageEntries);
   }
 
+  private async collectTopSnapshotsFromCurrentCategory(page: Page, limit: number) {
+    const conversationList = page.locator('#conversationList');
+    const hasConversationList = (await conversationList.count()) > 0;
+
+    if (!hasConversationList) {
+      return (await this.readVisibleSnapshots(page))
+        .filter((snapshot) => Boolean(snapshot.animDataId))
+        .slice(0, limit);
+    }
+
+    await conversationList.evaluate(scrollConversationListToTopFn).catch(() => ({ scrollTop: 0, clientHeight: 0, scrollHeight: 0 }));
+    await page.waitForTimeout(120);
+    return (await this.readVisibleSnapshots(page))
+      .filter((snapshot) => Boolean(snapshot.animDataId))
+      .slice(0, limit);
+  }
+
+  private async collectTopSnapshots(page: Page, totalLimit: number) {
+    const categoryKeys = await this.listConversationCategories(page);
+
+    if (categoryKeys.length === 0) {
+      return this.collectTopSnapshotsFromCurrentCategory(page, totalLimit);
+    }
+
+    const limitPerCategory = Math.max(1, totalLimit);
+    const snapshots = new Map<string, ConversationSnapshot>();
+    const scanSummary: Array<{ categoryKey: ConversationCategoryKey; snapshots: number }> = [];
+
+    for (const categoryKey of categoryKeys) {
+      const switched = await this.switchConversationCategory(page, categoryKey);
+      if (!switched) {
+        scanSummary.push({ categoryKey, snapshots: 0 });
+        continue;
+      }
+
+      const currentSnapshots = await this.collectTopSnapshotsFromCurrentCategory(page, limitPerCategory);
+      scanSummary.push({ categoryKey, snapshots: currentSnapshots.length });
+
+      for (const snapshot of currentSnapshots) {
+        if (!snapshot.animDataId || snapshots.has(snapshot.animDataId)) {
+          continue;
+        }
+
+        snapshots.set(snapshot.animDataId, {
+          ...snapshot,
+          categoryKey,
+        });
+      }
+    }
+
+    logger.info('watcher_conversation_category_live_scan_completed', {
+      categories: categoryKeys,
+      limitPerCategory,
+      scanSummary,
+      totalSnapshots: snapshots.size,
+    });
+
+    return Array.from(snapshots.values()).slice(0, totalLimit);
+  }
+
   private async collectSnapshotsFromCurrentCategory(page: Page, limit: number) {
     const snapshots = new Map<string, ConversationSnapshot>();
     const conversationList = page.locator('#conversationList');
@@ -1102,9 +1911,13 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     const originalScrollTop = await conversationList.evaluate(readScrollTopFn);
     let previousCount = 0;
     let stablePasses = 0;
-    const maxPasses = Math.max(8, Math.ceil(limit / 6) + 6);
+    let stalledScrollPasses = 0;
+    const maxPasses = Math.max(16, Math.ceil(limit / 4) + 10);
 
     try {
+      await conversationList.evaluate(scrollConversationListToTopFn);
+      await page.waitForTimeout(150);
+
       for (let pass = 0; pass < maxPasses && snapshots.size < limit; pass += 1) {
         const visibleSnapshots = await this.readVisibleSnapshots(page);
 
@@ -1121,11 +1934,24 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
           previousCount = snapshots.size;
         }
 
-        if (stablePasses >= 2) {
+        const currentMetrics = await conversationList.evaluate(readScrollMetricsFn);
+        const reachedBottom = currentMetrics.scrollTop + currentMetrics.clientHeight >= currentMetrics.scrollHeight - 16;
+
+        if (reachedBottom && stablePasses >= 1) {
           break;
         }
 
-        await conversationList.evaluate(scrollConversationListFn);
+        const nextMetrics = await conversationList.evaluate(scrollConversationListFn);
+        if (Math.abs(nextMetrics.scrollTop - currentMetrics.scrollTop) <= 1) {
+          stalledScrollPasses += 1;
+        } else {
+          stalledScrollPasses = 0;
+        }
+
+        if (stablePasses >= 2 && stalledScrollPasses >= 1) {
+          break;
+        }
+
         await page.waitForTimeout(180);
       }
     } finally {
@@ -1135,7 +1961,25 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     return Array.from(snapshots.values()).slice(0, limit);
   }
 
-  private async collectSnapshots(page: Page, limitPerCategory: number) {
+  private async recoverConversationList(page: Page, reason: string) {
+    logger.warn('watcher_playwright_conversation_list_recovering', {
+      reason,
+    });
+
+    await this.clearConversationSearch(page);
+    await page
+      .goto(env.WATCHER_ZALO_URL, {
+        waitUntil: 'domcontentloaded',
+        timeout: 15_000,
+      })
+      .catch(() => {});
+    await page.waitForTimeout(1_200);
+    await this.markWatcherManagedPage(page);
+    await this.clearConversationSearch(page);
+    await this.ensureRecentMessagesSynced(page);
+  }
+
+  private async collectSnapshotsInternal(page: Page, limitPerCategory: number) {
     const categoryKeys = await this.listConversationCategories(page);
 
     if (categoryKeys.length === 0) {
@@ -1174,6 +2018,25 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     });
 
     return Array.from(snapshots.values());
+  }
+
+  private async collectSnapshots(
+    page: Page,
+    limitPerCategory: number,
+    recoveryAttempt = 0,
+  ): Promise<ConversationSnapshot[]> {
+    const snapshots = await this.collectSnapshotsInternal(page, limitPerCategory);
+
+    if (snapshots.length > 0) {
+      return snapshots;
+    }
+
+    if (recoveryAttempt >= 1) {
+      return snapshots;
+    }
+
+    await this.recoverConversationList(page, 'empty_snapshot_scan');
+    return this.collectSnapshots(page, limitPerCategory, recoveryAttempt + 1);
   }
 
   private rememberSnapshotNames(snapshots: ConversationSnapshot[]) {
@@ -1222,15 +2085,87 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     return false;
   }
 
+  private scoreSnapshotForImmediateProcessing(snapshot: ConversationSnapshot, previousSignature: string | undefined) {
+    let score = 0;
+
+    if (snapshot.unread) {
+      score += 1_000;
+    }
+
+    if (isRecentTimeLabel(snapshot.timeLabel)) {
+      score += 500;
+    }
+
+    if (previousSignature === undefined) {
+      score += 220;
+    }
+
+    if (snapshot.categoryKey === 'other') {
+      score += 40;
+    }
+
+    score += Math.max(0, 200 - snapshot.visibleIndex * 15);
+    return score;
+  }
+
+  private getLiveSnapshotLimit() {
+    return Math.min(env.WATCHER_PLAYWRIGHT_VISIBLE_ITEM_LIMIT, WATCHER_MAX_LIVE_SNAPSHOT_LIMIT);
+  }
+
+  private getImmediateConversationLimit() {
+    return Math.min(env.WATCHER_PLAYWRIGHT_MAX_CONVERSATIONS_PER_POLL, this.getLiveSnapshotLimit());
+  }
+
   private async poll(onEvent: (event: SourceMessageEvent) => Promise<void>, isInitial: boolean) {
     const page = await this.ensurePage();
-    const [snapshots, storedGroups] = await Promise.all([
-      this.collectSnapshots(page, env.WATCHER_PLAYWRIGHT_VISIBLE_ITEM_LIMIT),
+    await this.clearConversationSearch(page);
+    await this.ensureRecentMessagesSynced(page);
+    const liveSnapshotLimit = this.getLiveSnapshotLimit();
+    const immediateConversationLimit = this.getImmediateConversationLimit();
+
+    const [initialSnapshots, storedGroups] = await Promise.all([
+      this.collectTopSnapshots(page, liveSnapshotLimit),
       this.readStoredGroupCandidates(page),
     ]);
+    let snapshots = initialSnapshots;
+
+    if (snapshots.length === 0) {
+      await this.recoverConversationList(page, 'empty_live_snapshot_scan');
+      snapshots = await this.collectTopSnapshots(page, liveSnapshotLimit);
+    }
+
+    if (snapshots.length === 0) {
+      this.consecutiveEmptySnapshotPolls += 1;
+      logger.warn('watcher_playwright_empty_snapshot_poll', {
+        consecutiveEmptySnapshotPolls: this.consecutiveEmptySnapshotPolls,
+      });
+
+      if (this.consecutiveEmptySnapshotPolls >= 2) {
+        await this.resetBrowserState('consecutive_empty_snapshot_polls');
+      }
+    } else {
+      this.consecutiveEmptySnapshotPolls = 0;
+    }
+
+    logger.info('watcher_playwright_live_poll_completed', {
+      liveSnapshots: snapshots.length,
+      storedGroups: storedGroups.length,
+      liveSnapshotLimit,
+      immediateConversationLimit,
+    });
+
     const storedGroupMap = new Map(storedGroups.map((group) => [group.externalId, group]));
     let stateChanged = this.rememberSnapshotNames(snapshots);
     let activeCategoryKey: ConversationCategoryKey | null = null;
+    let staleCandidates = 0;
+    const changedCandidates: Array<{
+      snapshot: ConversationSnapshot;
+      previousSignature: string | undefined;
+      signature: string;
+      lastReceiveTs: number | null;
+      activityAtMs: number;
+      score: number;
+    }> = [];
 
     for (const snapshot of snapshots) {
       if (!snapshot.animDataId || !snapshot.preview || !snapshot.name) {
@@ -1249,11 +2184,6 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       });
       const previousSignature = this.knownSignatures.get(snapshot.animDataId);
 
-      if (previousSignature !== signature) {
-        this.knownSignatures.set(snapshot.animDataId, signature);
-        stateChanged = true;
-      }
-
       if (previousSignature === signature) {
         continue;
       }
@@ -1268,6 +2198,65 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         }
       }
 
+      const activityAtMs = resolveSnapshotActivityTimeMs({
+        timeLabel: snapshot.timeLabel,
+        lastReceiveTs,
+      });
+
+      if (
+        snapshot.visibleIndex >= liveSnapshotLimit ||
+        !isFreshSnapshotActivityTime({
+          timeLabel: snapshot.timeLabel,
+          lastReceiveTs,
+        })
+      ) {
+        this.knownSignatures.set(snapshot.animDataId, signature);
+        stateChanged = true;
+        staleCandidates += 1;
+        continue;
+      }
+
+      changedCandidates.push({
+        snapshot,
+        previousSignature,
+        signature,
+        lastReceiveTs,
+        activityAtMs,
+        score: this.scoreSnapshotForImmediateProcessing(snapshot, previousSignature),
+      });
+    }
+
+    const immediateCandidates = changedCandidates
+      .sort((left, right) => right.score - left.score || left.snapshot.visibleIndex - right.snapshot.visibleIndex)
+      .slice(0, immediateConversationLimit);
+
+    logger.info('watcher_playwright_immediate_candidates_selected', {
+      changedCandidates: changedCandidates.length,
+      immediateCandidates: immediateCandidates.length,
+      staleCandidates,
+      candidateGroups: immediateCandidates.map((candidate) => ({
+        conversationId: candidate.snapshot.animDataId,
+        conversationName: candidate.snapshot.name,
+        visibleIndex: candidate.snapshot.visibleIndex,
+        unread: candidate.snapshot.unread,
+        timeLabel: candidate.snapshot.timeLabel,
+        activityAt: new Date(candidate.activityAtMs).toISOString(),
+        score: candidate.score,
+      })),
+    });
+
+    for (const candidate of immediateCandidates) {
+      const { snapshot, previousSignature, signature, lastReceiveTs, score } = candidate;
+      const conversationName = snapshot.name;
+      const previewText = snapshot.preview;
+
+      if (!conversationName || !previewText) {
+        continue;
+      }
+
+      this.knownSignatures.set(snapshot.animDataId, signature);
+      stateChanged = true;
+
       if (snapshot.categoryKey && snapshot.categoryKey !== activeCategoryKey) {
         const switched = await this.switchConversationCategory(page, snapshot.categoryKey);
         if (switched) {
@@ -1275,23 +2264,30 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         }
       }
 
-      const parsedPreview = parsePreview(snapshot.preview);
-      const fullMessage = await this.readLatestConversationMessage(page, snapshot.animDataId);
-      const resolvedMessageText = normalizePreservedMessageText(fullMessage?.messageText ?? null) ?? parsedPreview.messageText;
-      const resolvedSenderName = fullMessage?.senderName ?? parsedPreview.senderName;
+      const parsedPreview = parsePreview(previewText);
+      const fullMessage = await this.readLatestConversationMessage(page, snapshot.animDataId, conversationName);
+      const resolvedMessageText =
+        normalizePreservedMessageText(fullMessage?.messageText ?? null) ?? parsedPreview.messageText ?? previewText;
+      const resolvedSenderName = fullMessage?.senderName ?? parsedPreview.senderName ?? undefined;
       const contentSignature = buildMessageContentSignature({
+        conversationId: snapshot.animDataId,
         senderName: resolvedSenderName,
         messageText: resolvedMessageText,
       });
 
       if (this.shouldSkipRecentContent(contentSignature)) {
+        logger.info('watcher_playwright_recent_content_skipped', {
+          conversationId: snapshot.animDataId,
+          conversationName,
+          visibleIndex: snapshot.visibleIndex,
+        });
         continue;
       }
 
       await onEvent({
         source: 'zalo',
         groupExternalId: snapshot.animDataId,
-        groupName: snapshot.name,
+        groupName: conversationName,
         messageExternalId: `${snapshot.animDataId}:${signature}`,
         senderName: resolvedSenderName,
         messageText: resolvedMessageText,
@@ -1299,12 +2295,15 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         rawPayload: {
           adapter: 'playwright_conversation_list',
           conversationId: snapshot.animDataId,
-          conversationName: snapshot.name,
-          preview: snapshot.preview,
+          conversationName,
+          preview: previewText,
           fullMessageText: fullMessage?.messageText ?? null,
           fullMessageSource: fullMessage ? 'bubble' : 'preview',
           timeLabel: snapshot.timeLabel,
           unread: snapshot.unread,
+          visibleIndex: snapshot.visibleIndex,
+          processingScore: score,
+          previousSignature: previousSignature ?? null,
           conversationCategory: snapshot.categoryKey ?? null,
           lastReceiveTs,
         },

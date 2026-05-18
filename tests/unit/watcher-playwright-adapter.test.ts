@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   choosePreferredZaloPage,
+  isFreshSnapshotActivityTime,
   mergeDiscoveredGroups,
   normalizeConversationCategoryLabel,
   parseStoredGroupCandidates,
+  pickBestMessageTextCandidate,
   sortConversationCategoriesForScan,
   type StoredGroupCandidate,
 } from '@/src/modules/watchers/source-adapters';
@@ -59,6 +61,7 @@ test('mergeDiscoveredGroups keeps visible names and still syncs stored-only grou
         preview: 'Alice: hello',
         timeLabel: '10:20',
         unread: false,
+        visibleIndex: 0,
       },
       {
         animDataId: '12345',
@@ -66,6 +69,7 @@ test('mergeDiscoveredGroups keeps visible names and still syncs stored-only grou
         preview: 'Bob: ping',
         timeLabel: '10:21',
         unread: false,
+        visibleIndex: 1,
       },
     ],
     storedGroups,
@@ -175,4 +179,63 @@ test('normalizeConversationCategoryLabel recognizes Vietnamese and English label
 
 test('sortConversationCategoriesForScan prioritizes tab Kh\u00e1c and removes duplicates', () => {
   assert.deepEqual(sortConversationCategoriesForScan(['priority', 'other', 'priority']), ['other', 'priority']);
+});
+
+test('pickBestMessageTextCandidate prefers full multiline content over truncated preview', () => {
+  const selected = pickBestMessageTextCandidate([
+    'Minh Tâm: 📢📢 Tuyển dụng ✨ Vị...',
+    '📢📢 Tuyển dụng PG\nLương: 350k/ngày\nLiên hệ: 0909',
+  ]);
+
+  assert.equal(selected, '📢📢 Tuyển dụng PG\nLương: 350k/ngày\nLiên hệ: 0909');
+});
+
+test('pickBestMessageTextCandidate ignores reaction-like placeholders when a real message exists', () => {
+  const selected = pickBestMessageTextCandidate([
+    '/-strong\n/-heart\n:>\n:o\n:-((\n:-h',
+    'Chị cần tuyển PG làm cuối tuần\nCa: 9h-17h\nLương: 400k',
+  ]);
+
+  assert.equal(selected, 'Chị cần tuyển PG làm cuối tuần\nCa: 9h-17h\nLương: 400k');
+});
+
+test('isFreshSnapshotActivityTime rejects stale clock labels that are too old for realtime alerts', () => {
+  const now = Date.parse('2026-04-26T07:48:00.000Z');
+
+  assert.equal(
+    isFreshSnapshotActivityTime(
+      {
+        timeLabel: '14:30',
+        lastReceiveTs: null,
+      },
+      now,
+    ),
+    false,
+  );
+
+  assert.equal(
+    isFreshSnapshotActivityTime(
+      {
+        timeLabel: '14:43',
+        lastReceiveTs: null,
+      },
+      now,
+    ),
+    true,
+  );
+});
+
+test('isFreshSnapshotActivityTime prefers lastReceiveTs when available', () => {
+  const now = Date.parse('2026-04-26T07:48:00.000Z');
+
+  assert.equal(
+    isFreshSnapshotActivityTime(
+      {
+        timeLabel: '14:30',
+        lastReceiveTs: now - 2 * 60_000,
+      },
+      now,
+    ),
+    true,
+  );
 });

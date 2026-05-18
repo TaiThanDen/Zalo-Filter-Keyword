@@ -6,11 +6,9 @@ import { groupsRepository } from "@/src/modules/groups/groups.repository";
 import { ingestInboundMessage } from "@/src/modules/messages/messages.service";
 import { messagesRepository } from "@/src/modules/messages/messages.repository";
 import { notificationsRepository } from "@/src/modules/notifications/notifications.repository";
+import { telegramProvider } from "@/src/modules/notifications/telegram.provider";
 
 type EnsuredGroup = Awaited<ReturnType<typeof groupsRepository.ensureDiscoveredGroup>>["group"];
-type InboundMessageCreateInput = Parameters<typeof messagesRepository.createInboundMessage>[0];
-type MatchLogCreateInput = Parameters<typeof messagesRepository.createMatchLog>[0];
-type NotificationCreateInput = Parameters<typeof notificationsRepository.createDeliveries>[0];
 
 function stubMethod<T extends object, K extends keyof T>(obj: T, key: K, value: unknown) {
   const original = obj[key];
@@ -48,7 +46,7 @@ function createIncludeRule(pattern: string) {
   };
 }
 
-test("ingest auto-creates unknown group, evaluates first message, and schedules notification delivery", { concurrency: false }, async (t) => {
+test("ingest auto-creates unknown group, evaluates first message, and queues lightweight notifications", { concurrency: false }, async (t) => {
   const restore: Array<() => void> = [];
   t.after(() => {
     while (restore.length > 0) {
@@ -79,9 +77,10 @@ test("ingest auto-creates unknown group, evaluates first message, and schedules 
   } as unknown as EnsuredGroup;
 
   let ensuredInput: unknown;
-  let inboundMessageInput: InboundMessageCreateInput | undefined;
-  let matchLogInput: MatchLogCreateInput | undefined;
-  let deliveryInput: NotificationCreateInput | undefined;
+  let createInboundMessageCalled = false;
+  let createMatchLogCalled = false;
+  let outboxItems: Array<{ notificationChannelId: string; payload: unknown; dedupeKey: string }> = [];
+  const sentPayloads: unknown[] = [];
 
   restore.push(
     stubMethod(groupsRepository, "ensureDiscoveredGroup", async (input: unknown) => {
@@ -94,27 +93,120 @@ test("ingest auto-creates unknown group, evaluates first message, and schedules 
     }),
   );
   restore.push(
-    stubMethod(messagesRepository, "findPotentialDuplicateByExternalId", async () => null),
+    stubMethod(messagesRepository, "reserveMessageDedupe", async () => ({
+      reserved: true,
+      id: "dedupe-1",
+    })),
   );
   restore.push(
-    stubMethod(messagesRepository, "findPotentialDuplicateByFingerprint", async () => null),
-  );
-  restore.push(
-    stubMethod(messagesRepository, "createInboundMessage", async (input: InboundMessageCreateInput) => {
-      inboundMessageInput = input;
-      return { id: "inbound-1" } as unknown as Awaited<ReturnType<typeof messagesRepository.createInboundMessage>>;
+    stubMethod(messagesRepository, "createInboundMessage", async () => {
+      createInboundMessageCalled = true;
+      throw new Error("should not persist inbound message logs");
     }),
   );
   restore.push(
-    stubMethod(messagesRepository, "createMatchLog", async (input: MatchLogCreateInput) => {
-      matchLogInput = input;
-      return { id: "match-log-1" } as unknown as Awaited<ReturnType<typeof messagesRepository.createMatchLog>>;
+    stubMethod(messagesRepository, "createMatchLog", async () => {
+      createMatchLogCalled = true;
+      throw new Error("should not persist match logs");
     }),
   );
   restore.push(
-    stubMethod(notificationsRepository, "createDeliveries", async (input: NotificationCreateInput) => {
-      deliveryInput = input;
-      return [{ id: "delivery-1" }] as unknown as Awaited<ReturnType<typeof notificationsRepository.createDeliveries>>;
+    stubMethod(notificationsRepository, "listChannels", async () => [
+      {
+        id: "channel-all",
+        type: "TELEGRAM",
+        name: "Telegram all",
+        isActive: true,
+        config: { botToken: "token", chatId: "-1001", parseMode: "HTML" },
+        createdAt: new Date("2026-04-12T00:00:00.000Z"),
+        updatedAt: new Date("2026-04-12T00:00:00.000Z"),
+        notificationChannelRules: [],
+      },
+      {
+        id: "channel-pb",
+        type: "TELEGRAM",
+        name: "Telegram PB",
+        isActive: true,
+        config: { botToken: "token-2", chatId: "-1002", parseMode: "HTML" },
+        createdAt: new Date("2026-04-12T00:00:00.000Z"),
+        updatedAt: new Date("2026-04-12T00:00:00.000Z"),
+        notificationChannelRules: [
+          {
+            id: "channel-rule-1",
+            notificationChannelId: "channel-pb",
+            ruleId: "rule-PB",
+            createdAt: new Date("2026-04-12T00:00:00.000Z"),
+            rule: createIncludeRule("PB"),
+          },
+        ],
+      },
+      {
+        id: "channel-pg",
+        type: "TELEGRAM",
+        name: "Telegram PG",
+        isActive: true,
+        config: { botToken: "token-3", chatId: "-1003", parseMode: "HTML" },
+        createdAt: new Date("2026-04-12T00:00:00.000Z"),
+        updatedAt: new Date("2026-04-12T00:00:00.000Z"),
+        notificationChannelRules: [
+          {
+            id: "channel-rule-2",
+            notificationChannelId: "channel-pg",
+            ruleId: "rule-PG",
+            createdAt: new Date("2026-04-12T00:00:00.000Z"),
+            rule: createIncludeRule("PG"),
+          },
+        ],
+      },
+    ] as Awaited<ReturnType<typeof notificationsRepository.listChannels>>),
+  );
+  restore.push(
+    stubMethod(notificationsRepository, "createOutboxItems", async (items: typeof outboxItems) => {
+      outboxItems = items;
+      return items.map((item, index) => ({ id: `outbox-${index + 1}`, ...item }));
+    }),
+  );
+  restore.push(
+    stubMethod(notificationsRepository, "listOutboxItemsByIds", async () => outboxItems.map((item, index) => ({
+      id: `outbox-${index + 1}`,
+      notificationChannelId: item.notificationChannelId,
+      status: "PENDING",
+      attempts: 0,
+      nextRetryAt: null,
+      sentAt: null,
+      lastError: null,
+      payload: item.payload,
+      dedupeKey: item.dedupeKey,
+      expiresAt: new Date("2026-04-15T00:00:00.000Z"),
+      createdAt: new Date("2026-04-12T00:00:00.000Z"),
+      updatedAt: new Date("2026-04-12T00:00:00.000Z"),
+      notificationChannel: {
+        id: item.notificationChannelId,
+        type: "TELEGRAM",
+        name: item.notificationChannelId,
+        isActive: true,
+        config: { botToken: "token", chatId: "-1001", parseMode: "HTML" },
+        createdAt: new Date("2026-04-12T00:00:00.000Z"),
+        updatedAt: new Date("2026-04-12T00:00:00.000Z"),
+      },
+    }))),
+  );
+  restore.push(
+    stubMethod(notificationsRepository, "markOutboxProcessing", async () => ({})),
+  );
+  restore.push(
+    stubMethod(notificationsRepository, "markOutboxSent", async () => ({})),
+  );
+  restore.push(
+    stubMethod(notificationsRepository, "markOutboxRetry", async () => ({})),
+  );
+  restore.push(
+    stubMethod(notificationsRepository, "markOutboxFailed", async () => ({})),
+  );
+  restore.push(
+    stubMethod(telegramProvider, "send", async (payload: unknown) => {
+      sentPayloads.push(payload);
+      return { ok: true };
     }),
   );
 
@@ -129,10 +221,6 @@ test("ingest auto-creates unknown group, evaluates first message, and schedules 
     rawPayload: { raw: true },
   });
 
-  assert.ok(inboundMessageInput);
-  assert.ok(matchLogInput);
-  assert.ok(deliveryInput);
-
   assert.deepEqual(ensuredInput, {
     source: "zalo",
     externalId: "group-001",
@@ -143,47 +231,30 @@ test("ingest auto-creates unknown group, evaluates first message, and schedules 
   assert.notEqual(result.decision, MatchDecision.REJECTED_UNKNOWN_GROUP);
   assert.equal(result.reason, "matched");
   assert.deepEqual(result.matchedIncludeRules, ["PB"]);
-  assert.equal(result.notificationDeliveriesCreated, 1);
-  assert.deepEqual(inboundMessageInput, {
-    source: "zalo",
-    watcherId: "watcher-1",
-    groupId: "group-1",
-    groupExternalId: "group-001",
-    groupName: "PB Support Group",
-    messageExternalId: "msg-1",
-    senderExternalId: null,
-    senderName: "Alice",
-    messageText: "Can team PB support this ticket?",
-    normalizedText: "can team pb support this ticket?",
-    messageTime: new Date("2026-04-12T01:23:45.000Z"),
-    fingerprint: inboundMessageInput.fingerprint,
-    rawPayload: { raw: true },
-  });
-  assert.deepEqual(matchLogInput, {
-    inboundMessageId: "inbound-1",
-    decision: MatchDecision.MATCHED,
-    matchedIncludeRules: [
-      {
-        id: "rule-PB",
-        pattern: "PB",
-        type: "INCLUDE",
-        matchType: "CONTAINS",
-      },
-    ],
-    matchedExcludeRules: [],
-    reason: "matched",
-  });
-  assert.deepEqual(deliveryInput, {
-    matchLogId: "match-log-1",
-    matchedRuleIds: ["rule-PB"],
-    payload: {
+  assert.equal(result.inboundMessageId, null);
+  assert.equal(result.messageDedupeId, "dedupe-1");
+  assert.equal(result.notificationDeliveriesCreated, 0);
+  assert.equal(result.notificationsQueued, 2);
+  assert.equal(createInboundMessageCalled, false);
+  assert.equal(createMatchLogCalled, false);
+  assert.deepEqual(outboxItems.map((item) => item.notificationChannelId), ["channel-all", "channel-pb"]);
+  assert.deepEqual(outboxItems.map((item) => item.payload), [
+    {
       groupName: "PB Support Group",
       senderName: "Alice",
       messageText: "Can team PB support this ticket?",
       messageTime: "2026-04-12T01:23:45.000Z",
       matchedKeywords: ["PB"],
     },
-  });
+    {
+      groupName: "PB Support Group",
+      senderName: "Alice",
+      messageText: "Can team PB support this ticket?",
+      messageTime: "2026-04-12T01:23:45.000Z",
+      matchedKeywords: ["PB"],
+    },
+  ]);
+  assert.equal(sentPayloads.length, 2);
 });
 
 test("ensureDiscoveredGroup falls back to existing group on unique conflict without creating duplicates", { concurrency: false }, async (t) => {
@@ -278,7 +349,7 @@ test("ensureDiscoveredGroup falls back to existing group on unique conflict with
 });
 
 
-test("ingest suppresses duplicate external-id races without scheduling a second alert", { concurrency: false }, async (t) => {
+test("ingest suppresses duplicates from lightweight dedupe without writing a log or alert", { concurrency: false }, async (t) => {
   const restore: Array<() => void> = [];
   t.after(() => {
     while (restore.length > 0) {
@@ -310,6 +381,7 @@ test("ingest suppresses duplicate external-id races without scheduling a second 
 
   let matchLogCalled = false;
   let deliveriesCalled = false;
+  let outboxCalled = false;
 
   restore.push(
     stubMethod(groupsRepository, "ensureDiscoveredGroup", async () => ({
@@ -319,27 +391,9 @@ test("ingest suppresses duplicate external-id races without scheduling a second 
     })),
   );
   restore.push(
-    stubMethod(messagesRepository, "findPotentialDuplicateByExternalId", async () => null),
-  );
-  restore.push(
-    stubMethod(messagesRepository, "findPotentialDuplicateByFingerprint", async () => null),
-  );
-  restore.push(
-    stubMethod(messagesRepository, "createInboundMessage", async () => {
-      throw new Prisma.PrismaClientKnownRequestError("Unique constraint failed", {
-        code: "P2002",
-        clientVersion: "test",
-        meta: { target: ["source", "groupExternalId", "messageExternalId"] },
-      });
-    }),
-  );
-  restore.push(
-    stubMethod(messagesRepository, "findBySourceGroupAndExternalId", async () => ({
-      id: "existing-inbound",
-      matchLog: {
-        decision: MatchDecision.MATCHED,
-        reason: "matched",
-      },
+    stubMethod(messagesRepository, "reserveMessageDedupe", async () => ({
+      reserved: false,
+      id: null,
     })),
   );
   restore.push(
@@ -354,6 +408,12 @@ test("ingest suppresses duplicate external-id races without scheduling a second 
       throw new Error("should not create duplicate deliveries");
     }),
   );
+  restore.push(
+    stubMethod(notificationsRepository, "createOutboxItems", async () => {
+      outboxCalled = true;
+      throw new Error("should not queue duplicate notification");
+    }),
+  );
 
   const result = await ingestInboundMessage(createWatcher(), {
     source: "zalo",
@@ -365,10 +425,12 @@ test("ingest suppresses duplicate external-id races without scheduling a second 
     messageTime: "2026-04-12T01:23:45.000Z",
   });
 
-  assert.equal(result.inboundMessageId, "existing-inbound");
-  assert.equal(result.decision, MatchDecision.MATCHED);
-  assert.equal(result.reason, "matched");
+  assert.equal(result.inboundMessageId, null);
+  assert.equal(result.decision, MatchDecision.REJECTED_DUPLICATE);
+  assert.equal(result.reason, "duplicate_message");
   assert.equal(result.notificationDeliveriesCreated, 0);
+  assert.equal(result.notificationsQueued, 0);
   assert.equal(matchLogCalled, false);
   assert.equal(deliveriesCalled, false);
+  assert.equal(outboxCalled, false);
 });

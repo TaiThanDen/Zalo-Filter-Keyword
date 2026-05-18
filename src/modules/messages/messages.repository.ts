@@ -2,6 +2,10 @@ import { Prisma, MatchDecision } from "@prisma/client";
 import { IMPLEMENTATION_DEFAULTS } from "@/src/config/constants";
 import { db } from "@/src/lib/db";
 
+function isUniqueConflict(error: unknown) {
+  return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
+}
+
 export const messagesRepository = {
   findBySourceGroupAndExternalId(input: {
     source: string;
@@ -87,5 +91,48 @@ export const messagesRepository = {
     reason: string;
   }) {
     return db.matchLog.create({ data });
+  },
+  async reserveMessageDedupe(data: {
+    source: string;
+    groupExternalId: string;
+    messageExternalId?: string | null;
+    fingerprint: string;
+    messageTime: Date;
+  }) {
+    try {
+      const dedupe = await db.messageDedupe.create({
+        data: {
+          source: data.source,
+          groupExternalId: data.groupExternalId,
+          messageExternalId: data.messageExternalId ?? null,
+          fingerprint: data.fingerprint,
+          messageTime: data.messageTime,
+          expiresAt: new Date(Date.now() + IMPLEMENTATION_DEFAULTS.messageDedupeTtlMs),
+        },
+      });
+
+      return {
+        reserved: true,
+        id: dedupe.id,
+      };
+    } catch (error) {
+      if (!isUniqueConflict(error)) {
+        throw error;
+      }
+
+      return {
+        reserved: false,
+        id: null,
+      };
+    }
+  },
+  pruneExpiredMessageDedupes(now = new Date()) {
+    return db.messageDedupe.deleteMany({
+      where: {
+        expiresAt: {
+          lt: now,
+        },
+      },
+    });
   },
 };

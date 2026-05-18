@@ -134,7 +134,16 @@ export async function getLogDetail(id: string) {
 }
 
 export async function getDashboardStats() {
-  const [totalGroups, enabledGroups, activeRules, matches24h, failedDeliveries, watchers] = await Promise.all([
+  const [
+    totalGroups,
+    enabledGroups,
+    activeRules,
+    legacyMatches24h,
+    outboxAlerts24h,
+    legacyFailedDeliveries,
+    outboxFailedDeliveries,
+    watchers,
+  ] = await Promise.all([
     db.group.count(),
     db.group.count({ where: { isEnabled: true } }),
     db.rule.count({ where: { isActive: true } }),
@@ -146,7 +155,15 @@ export async function getDashboardStats() {
         },
       },
     }),
+    db.notificationOutbox.count({
+      where: {
+        createdAt: {
+          gte: new Date(Date.now() - 24 * 60 * 60 * 1000),
+        },
+      },
+    }),
     db.notificationDelivery.count({ where: { status: "FAILED" } }),
+    db.notificationOutbox.count({ where: { status: "FAILED" } }),
     db.watcher.findMany(),
   ]);
 
@@ -154,8 +171,8 @@ export async function getDashboardStats() {
     totalGroups,
     enabledGroups,
     activeRules,
-    matches24h,
-    failedDeliveries,
+    matches24h: legacyMatches24h + outboxAlerts24h,
+    failedDeliveries: legacyFailedDeliveries + outboxFailedDeliveries,
     watchersOnline: watchers.filter(
       (watcher) => watcher.lastHeartbeatAt && Date.now() - watcher.lastHeartbeatAt.getTime() <= 60_000,
     ).length,

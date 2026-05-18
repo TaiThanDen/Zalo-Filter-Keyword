@@ -12,6 +12,8 @@ export const IMPLEMENTATION_DEFAULTS = {
   dedupeFingerprintBucketMs: 60_000,
   duplicateWindowMs: 300_000,
   notificationCrossGroupDedupeWindowMs: 120_000,
+  messageDedupeTtlMs: 24 * 60 * 60 * 1000,
+  notificationOutboxTtlMs: 3 * 24 * 60 * 60 * 1000,
   sessionTtlMs: 1000 * 60 * 60 * 24 * 7,
   watcherStatusThresholdsMs: {
     online: 60_000,

@@ -7,9 +7,9 @@ export default async function DashboardPage() {
   const cards = [
     { label: "Nhóm", value: stats.totalGroups, helper: `${stats.enabledGroups} nhóm đang bật` },
     { label: "Luật đang dùng", value: stats.activeRules, helper: "include + exclude" },
-    { label: "Lượt khớp 24h", value: stats.matches24h, helper: "message khớp trong 24 giờ gần nhất" },
+    { label: "Alert 24h", value: stats.matches24h, helper: "outbox mới + match log cũ" },
     { label: "Watcher online", value: stats.watchersOnline, helper: "dựa trên heartbeat" },
-    { label: "Gửi lỗi", value: stats.failedDeliveries, helper: "notification_delivery đang lỗi" },
+    { label: "Gửi lỗi", value: stats.failedDeliveries, helper: "outbox hoặc delivery đang lỗi" },
   ];
 
   return (
@@ -20,7 +20,7 @@ export default async function DashboardPage() {
         </span>
         <h2 className="text-3xl font-semibold tracking-tight">Ảnh chụp vận hành</h2>
         <p className="max-w-3xl text-sm leading-6 text-[var(--color-muted)]">
-          Màn hình này cho bạn biết nhanh số nhóm đang theo dõi, độ phủ của luật, lượt khớp gần đây, tình trạng watcher và lỗi gửi thông báo.
+          Màn hình này cho bạn biết nhanh số nhóm đang theo dõi, độ phủ của luật, alert gần đây, tình trạng watcher và lỗi gửi thông báo.
         </p>
       </section>
 
@@ -50,7 +50,7 @@ export default async function DashboardPage() {
         <Link href="/logs" className="card rounded-[1.6rem] p-5 transition hover:-translate-y-0.5">
           <h3 className="text-lg font-semibold">Xem nhật ký</h3>
           <p className="mt-2 text-sm leading-6 text-[var(--color-muted)]">
-            Xem inbound_message, quyết định match_log, payload gốc và trạng thái gửi thông báo.
+            Xem dữ liệu lịch sử từ inbound_message, match_log và trạng thái gửi thông báo trước khi chuyển sang outbox nhẹ.
           </p>
         </Link>
       </section>

@@ -38,7 +38,7 @@ export default async function LogsPage({
           <div>
             <h2 className="text-3xl font-semibold tracking-tight">Nhật ký</h2>
             <p className="mt-2 max-w-3xl text-sm leading-6 text-[var(--color-muted)]">
-              Theo dõi inbound_message, quyết định match_log, luật đã khớp và trạng thái notification_delivery trong một giao diện dễ đọc hơn trên cả desktop lẫn mobile.
+              Xem dữ liệu lịch sử từ inbound_message, match_log và notification_delivery. Alert mới dùng outbox nhẹ nên không ghi payload gốc vào nhật ký này.
             </p>
           </div>
           <div className="grid gap-3 sm:grid-cols-3">

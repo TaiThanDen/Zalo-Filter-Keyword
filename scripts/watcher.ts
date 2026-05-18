@@ -21,6 +21,20 @@ async function fetchConfig() {
   return response.json();
 }
 
+function toSeedableGroups(config: unknown): DiscoveredSourceGroup[] {
+  if (!config || typeof config !== "object" || !Array.isArray((config as { groups?: unknown[] }).groups)) {
+    return [];
+  }
+
+  return (config as { groups: Array<{ source?: unknown; externalId?: unknown; name?: unknown }> }).groups
+    .filter((group) => group.source === "zalo" && typeof group.externalId === "string" && typeof group.name === "string")
+    .map((group) => ({
+      source: "zalo" as const,
+      externalId: group.externalId as string,
+      name: group.name as string,
+    }));
+}
+
 async function sendHeartbeat() {
   const response = await fetch(`${env.WATCHER_API_BASE_URL}/api/watcher/heartbeat`, {
     method: "POST",
@@ -133,13 +147,17 @@ async function main() {
   logger.info("watcher_started", { mode });
 
   await sendHeartbeat();
-  await syncGroupsFromAdapter(adapter);
 
   const config = await fetchConfig();
+  const seedableGroups = toSeedableGroups(config);
+  await adapter.seedKnownGroups?.(seedableGroups);
   logger.info("watcher_config_loaded", config);
+  logger.info("watcher_config_seeded", { groups: seedableGroups.length });
 
+  await syncGroupsFromAdapter(adapter);
   await flushBuffer(sendMessage);
   await adapter.start(sendMessage);
+  await syncGroupsFromAdapter(adapter);
 
   setInterval(() => {
     sendHeartbeat().catch((error) => {
@@ -150,11 +168,13 @@ async function main() {
   }, env.WATCHER_HEARTBEAT_INTERVAL_MS);
 
   setInterval(() => {
-    fetchConfig().catch((error) => {
+    fetchConfig()
+      .then((config) => adapter.seedKnownGroups?.(toSeedableGroups(config)))
+      .catch((error) => {
       logger.warn("watcher_config_refresh_failed", {
         error: error instanceof Error ? error.message : String(error),
       });
-    });
+      });
 
     syncGroupsFromAdapter(adapter).catch((error) => {
       logger.warn("watcher_group_sync_failed", {

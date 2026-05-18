@@ -105,6 +105,15 @@ function isDeliveryChannelConflict(error: unknown) {
   );
 }
 
+function isOutboxDedupeConflict(error: unknown) {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError
+    && error.code === 'P2002'
+    && Array.isArray(error.meta?.target)
+    && error.meta.target.includes('dedupeKey')
+  );
+}
+
 export const notificationsRepository = {
   listChannels() {
     return db.notificationChannel.findMany({
@@ -376,6 +385,116 @@ export const notificationsRepository = {
         status: NotificationDeliveryStatus.FAILED,
         lastError,
         nextRetryAt: null,
+      },
+    });
+  },
+  async createOutboxItems(items: Array<{
+    notificationChannelId: string;
+    payload: Prisma.InputJsonValue;
+    dedupeKey: string;
+    expiresAt: Date;
+  }>) {
+    const created = [];
+
+    for (const item of items) {
+      try {
+        created.push(
+          await db.notificationOutbox.create({
+            data: item,
+          }),
+        );
+      } catch (error) {
+        if (!isOutboxDedupeConflict(error)) {
+          throw error;
+        }
+      }
+    }
+
+    return created;
+  },
+  listOutboxItemsByIds(ids: string[]) {
+    return db.notificationOutbox.findMany({
+      where: {
+        id: {
+          in: ids,
+        },
+        status: {
+          in: [NotificationDeliveryStatus.PENDING, NotificationDeliveryStatus.RETRY_SCHEDULED],
+        },
+      },
+      include: {
+        notificationChannel: true,
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+  },
+  listDueOutboxItems(now: Date, take: number) {
+    return db.notificationOutbox.findMany({
+      where: {
+        OR: [
+          { status: NotificationDeliveryStatus.PENDING },
+          {
+            status: NotificationDeliveryStatus.RETRY_SCHEDULED,
+            nextRetryAt: { lte: now },
+          },
+        ],
+      },
+      include: {
+        notificationChannel: true,
+      },
+      orderBy: { createdAt: 'asc' },
+      take,
+    });
+  },
+  markOutboxProcessing(id: string, attempts: number) {
+    return db.notificationOutbox.update({
+      where: { id },
+      data: {
+        status: NotificationDeliveryStatus.PROCESSING,
+        attempts,
+      },
+    });
+  },
+  markOutboxSent(id: string) {
+    return db.notificationOutbox.update({
+      where: { id },
+      data: {
+        status: NotificationDeliveryStatus.SENT,
+        sentAt: new Date(),
+        lastError: null,
+        nextRetryAt: null,
+      },
+    });
+  },
+  markOutboxRetry(id: string, lastError: string, nextRetryAt: Date) {
+    return db.notificationOutbox.update({
+      where: { id },
+      data: {
+        status: NotificationDeliveryStatus.RETRY_SCHEDULED,
+        lastError,
+        nextRetryAt,
+      },
+    });
+  },
+  markOutboxFailed(id: string, lastError: string) {
+    return db.notificationOutbox.update({
+      where: { id },
+      data: {
+        status: NotificationDeliveryStatus.FAILED,
+        lastError,
+        nextRetryAt: null,
+      },
+    });
+  },
+  pruneExpiredOutboxItems(now = new Date()) {
+    return db.notificationOutbox.deleteMany({
+      where: {
+        expiresAt: {
+          lt: now,
+        },
+        status: {
+          in: [NotificationDeliveryStatus.SENT, NotificationDeliveryStatus.FAILED],
+        },
       },
     });
   },

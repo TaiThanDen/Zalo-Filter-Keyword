@@ -179,6 +179,7 @@ model NotificationChannel {
   config                   Json
   notificationChannelRules NotificationChannelRule[]
   notificationDeliveries   NotificationDelivery[]
+  notificationOutboxes     NotificationOutbox[]
   createdAt                DateTime                  @default(now())
   updatedAt                DateTime                  @updatedAt
 }
@@ -213,4 +214,39 @@ model NotificationDelivery {
   @@index([status, nextRetryAt])
   @@index([notificationChannelId, status])
   @@unique([matchLogId, notificationChannelId])
+}
+
+model MessageDedupe {
+  id                String   @id @default(cuid())
+  source            String   @default("zalo")
+  groupExternalId   String
+  messageExternalId String?
+  fingerprint       String   @unique
+  messageTime       DateTime
+  expiresAt         DateTime
+  createdAt         DateTime @default(now())
+
+  @@unique([source, groupExternalId, messageExternalId])
+  @@index([source, groupExternalId, messageTime])
+  @@index([expiresAt])
+}
+
+model NotificationOutbox {
+  id                    String                     @id @default(cuid())
+  notificationChannelId String
+  status                NotificationDeliveryStatus @default(PENDING)
+  attempts              Int                        @default(0)
+  nextRetryAt           DateTime?
+  sentAt                DateTime?
+  lastError             String?
+  payload               Json
+  dedupeKey             String                     @unique
+  expiresAt             DateTime
+  createdAt             DateTime                   @default(now())
+  updatedAt             DateTime                   @updatedAt
+  notificationChannel   NotificationChannel        @relation(fields: [notificationChannelId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextRetryAt])
+  @@index([notificationChannelId, status])
+  @@index([expiresAt])
 }

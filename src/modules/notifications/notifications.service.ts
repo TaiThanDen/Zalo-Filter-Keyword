@@ -6,7 +6,64 @@ import { AppError } from "@/src/lib/errors";
 import { notificationsRepository } from "@/src/modules/notifications/notifications.repository";
 import { telegramProvider } from "@/src/modules/notifications/telegram.provider";
 import type { NotificationPayload } from "@/src/modules/notifications/notifications.types";
+import { messagesRepository } from "@/src/modules/messages/messages.repository";
 import { rulesRepository } from "@/src/modules/rules/rules.repository";
+
+type DirectNotificationDedupeInput = {
+  source: string;
+  normalizedText: string;
+  messageTime: Date;
+  senderExternalId?: string | null;
+  senderName?: string | null;
+};
+
+type TelegramConfig = {
+  botToken?: string;
+  chatId?: string;
+  parseMode?: string;
+};
+
+const runtimeStatePruneIntervalMs = 15 * 60 * 1000;
+let lastRuntimeStatePrunedAt = 0;
+
+function normalizeNotificationIdentity(value: string | null | undefined) {
+  return (value ?? "")
+    .normalize("NFKC")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function buildChannelDestinationKey(channel: {
+  id: string;
+  type: "TELEGRAM" | "MESSENGER";
+  config: Prisma.JsonValue;
+}) {
+  if (channel.type !== "TELEGRAM") {
+    return `${channel.type}:${channel.id}`;
+  }
+
+  const config = (channel.config ?? {}) as TelegramConfig;
+  return [
+    channel.type,
+    String(config.botToken ?? ""),
+    String(config.chatId ?? ""),
+    String(config.parseMode ?? ""),
+  ].join("|");
+}
+
+function buildDirectDedupeKey(destinationKey: string, input: DirectNotificationDedupeInput) {
+  const senderIdentity = normalizeNotificationIdentity(input.senderExternalId || input.senderName || "unknown_sender");
+  const bucket = Math.floor(input.messageTime.getTime() / IMPLEMENTATION_DEFAULTS.notificationCrossGroupDedupeWindowMs);
+
+  return [
+    destinationKey,
+    input.source,
+    senderIdentity,
+    input.normalizedText,
+    String(bucket),
+  ].join("|");
+}
 
 async function ensureNotificationRulesExist(ruleIds: string[]) {
   const uniqueRuleIds = Array.from(new Set(ruleIds));
@@ -84,7 +141,50 @@ export async function scheduleNotificationDeliveries(
   });
 }
 
+export async function queueMatchedRuleNotifications(
+  payload: NotificationPayload,
+  matchedRuleIds: string[],
+  dedupeInput: DirectNotificationDedupeInput,
+) {
+  const matchedRuleIdSet = new Set(matchedRuleIds);
+  const channels = await notificationsRepository.listChannels();
+  const matchingChannels = channels.filter((channel) => {
+    if (!channel.isActive) {
+      return false;
+    }
+
+    if (channel.notificationChannelRules.length === 0) {
+      return true;
+    }
+
+    return channel.notificationChannelRules.some((channelRule) => matchedRuleIdSet.has(channelRule.ruleId));
+  });
+  const dedupedChannels = matchingChannels.filter((channel, index, items) => {
+    const currentKey = buildChannelDestinationKey(channel);
+    return items.findIndex((candidate) => buildChannelDestinationKey(candidate) === currentKey) === index;
+  });
+  const expiresAt = new Date(Date.now() + IMPLEMENTATION_DEFAULTS.notificationOutboxTtlMs);
+  const items = dedupedChannels.map((channel) => {
+    const destinationKey = buildChannelDestinationKey(channel);
+
+    return {
+      notificationChannelId: channel.id,
+      payload: payload as Prisma.InputJsonValue,
+      dedupeKey: buildDirectDedupeKey(destinationKey, dedupeInput),
+      expiresAt,
+    };
+  });
+
+  const created = await notificationsRepository.createOutboxItems(items);
+
+  await dispatchOutboxItemsById(created.map((item) => item.id));
+
+  return created;
+}
+
 export async function processDueNotificationDeliveries() {
+  await pruneExpiredNotificationRuntimeState();
+
   const deliveries = await notificationsRepository.listDueDeliveries(
     new Date(),
     IMPLEMENTATION_DEFAULTS.workerClaimBatchSize,
@@ -120,7 +220,69 @@ export async function processDueNotificationDeliveries() {
     }
   }
 
-  return deliveries.length;
+  const outboxItems = await notificationsRepository.listDueOutboxItems(
+    new Date(),
+    IMPLEMENTATION_DEFAULTS.workerClaimBatchSize,
+  );
+
+  await dispatchOutboxItems(outboxItems);
+
+  return deliveries.length + outboxItems.length;
+}
+
+async function dispatchOutboxItemsById(ids: string[]) {
+  if (ids.length === 0) {
+    return;
+  }
+
+  await dispatchOutboxItems(await notificationsRepository.listOutboxItemsByIds(ids));
+}
+
+async function dispatchOutboxItems(
+  outboxItems: Awaited<ReturnType<typeof notificationsRepository.listDueOutboxItems>>,
+) {
+  for (const item of outboxItems) {
+    const nextAttempt = item.attempts + 1;
+    await notificationsRepository.markOutboxProcessing(item.id, nextAttempt);
+
+    try {
+      if (item.notificationChannel.type !== "TELEGRAM") {
+        throw new Error("Unsupported notification provider for MVP");
+      }
+
+      await telegramProvider.send(
+        item.payload as unknown as NotificationPayload,
+        item.notificationChannel.config,
+      );
+      await notificationsRepository.markOutboxSent(item.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const retryDelay = IMPLEMENTATION_DEFAULTS.notificationRetryScheduleMs[nextAttempt - 1];
+
+      if (nextAttempt >= env.NOTIFICATION_MAX_ATTEMPTS || !retryDelay) {
+        await notificationsRepository.markOutboxFailed(item.id, message);
+      } else {
+        await notificationsRepository.markOutboxRetry(
+          item.id,
+          message,
+          addMilliseconds(new Date(), retryDelay),
+        );
+      }
+    }
+  }
+}
+
+async function pruneExpiredNotificationRuntimeState(now = new Date()) {
+  if (now.getTime() - lastRuntimeStatePrunedAt < runtimeStatePruneIntervalMs) {
+    return;
+  }
+
+  lastRuntimeStatePrunedAt = now.getTime();
+
+  await Promise.all([
+    messagesRepository.pruneExpiredMessageDedupes(now),
+    notificationsRepository.pruneExpiredOutboxItems(now),
+  ]);
 }
 
 export function summarizeNotificationStatus(statuses: NotificationDeliveryStatus[]) {
