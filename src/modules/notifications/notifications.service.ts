@@ -177,8 +177,6 @@ export async function queueMatchedRuleNotifications(
 
   const created = await notificationsRepository.createOutboxItems(items);
 
-  await dispatchOutboxItemsById(created.map((item) => item.id));
-
   return created;
 }
 
@@ -228,14 +226,6 @@ export async function processDueNotificationDeliveries() {
   await dispatchOutboxItems(outboxItems);
 
   return deliveries.length + outboxItems.length;
-}
-
-async function dispatchOutboxItemsById(ids: string[]) {
-  if (ids.length === 0) {
-    return;
-  }
-
-  await dispatchOutboxItems(await notificationsRepository.listOutboxItemsByIds(ids));
 }
 
 async function dispatchOutboxItems(

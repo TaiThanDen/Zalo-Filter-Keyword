@@ -254,7 +254,7 @@ test("ingest auto-creates unknown group, evaluates first message, and queues lig
       matchedKeywords: ["PB"],
     },
   ]);
-  assert.equal(sentPayloads.length, 2);
+  assert.equal(sentPayloads.length, 0);
 });
 
 test("ensureDiscoveredGroup falls back to existing group on unique conflict without creating duplicates", { concurrency: false }, async (t) => {
