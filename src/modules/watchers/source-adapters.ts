@@ -302,6 +302,22 @@ function normalizePreservedMessageText(value: string | null) {
   return normalized || null;
 }
 
+function stripLeadingSenderNameFromMessage(messageText: string, senderName?: string | null) {
+  const normalizedSender = normalizeSingleLineText(senderName ?? null);
+  if (!normalizedSender) {
+    return messageText;
+  }
+
+  const lines = messageText.split('\n');
+  const firstLine = normalizeSingleLineText(lines[0] ?? null);
+
+  if (firstLine?.toLowerCase() !== normalizedSender.toLowerCase()) {
+    return messageText;
+  }
+
+  return normalizePreservedMessageText(lines.slice(1).join('\n')) ?? messageText;
+}
+
 function scoreMessageTextCandidate(value: string | null) {
   const normalized = normalizePreservedMessageText(value);
   if (!normalized) {
@@ -1852,7 +1868,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         await bubble.locator('.message-sender-name-content .truncate').first().textContent({ timeout: 250 }).catch(() => null),
       );
       return {
-        messageText,
+        messageText: stripLeadingSenderNameFromMessage(messageText, senderName),
         senderName: senderName || undefined,
       };
     }

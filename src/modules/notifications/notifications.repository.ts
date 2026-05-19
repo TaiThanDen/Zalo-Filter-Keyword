@@ -392,17 +392,52 @@ export const notificationsRepository = {
     notificationChannelId: string;
     payload: Prisma.InputJsonValue;
     dedupeKey: string;
+    dedupeConflictKeys?: string[];
+    dedupeLockKey?: string;
+    dedupeWindowStart?: Date;
     expiresAt: Date;
   }>) {
     const created = [];
 
     for (const item of items) {
       try {
-        created.push(
-          await db.notificationOutbox.create({
-            data: item,
-          }),
-        );
+        const createdItem = await db.$transaction(async (tx) => {
+          if (item.dedupeLockKey) {
+            await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${item.dedupeLockKey}))`;
+          }
+
+          if (item.dedupeConflictKeys && item.dedupeConflictKeys.length > 0) {
+            const existingOutboxItem = await tx.notificationOutbox.findFirst({
+              where: {
+                notificationChannelId: item.notificationChannelId,
+                dedupeKey: {
+                  in: item.dedupeConflictKeys,
+                },
+                createdAt: {
+                  gte: item.dedupeWindowStart ?? new Date(0),
+                },
+              },
+              select: { id: true },
+            });
+
+            if (existingOutboxItem) {
+              return null;
+            }
+          }
+
+          return tx.notificationOutbox.create({
+            data: {
+              notificationChannelId: item.notificationChannelId,
+              payload: item.payload,
+              dedupeKey: item.dedupeKey,
+              expiresAt: item.expiresAt,
+            },
+          });
+        });
+
+        if (createdItem) {
+          created.push(createdItem);
+        }
       } catch (error) {
         if (!isOutboxDedupeConflict(error)) {
           throw error;

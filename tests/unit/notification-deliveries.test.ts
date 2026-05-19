@@ -39,6 +39,10 @@ type MockTransaction = {
     findFirst: (input: { where: { notificationChannelId: string | { in: string[] } } }) => Promise<{ id: string } | null>;
     create: (input: { data: { notificationChannelId: string } }) => Promise<{ id: string }>;
   };
+  notificationOutbox: {
+    findFirst: (input: { where: { dedupeKey?: { in: string[] }; createdAt?: { gte: Date } } }) => Promise<{ id: string } | null>;
+    create: (input: { data: { notificationChannelId: string; dedupeKey: string } }) => Promise<{ id: string }>;
+  };
 };
 
 function createBaseTransactionState() {
@@ -66,6 +70,12 @@ function createBaseTransactionState() {
         createdChannelIds.push(input.data.notificationChannelId);
         return { id: `delivery-${input.data.notificationChannelId}` };
       },
+    },
+    notificationOutbox: {
+      findFirst: async () => null,
+      create: async (input: { data: { notificationChannelId: string; dedupeKey: string } }) => ({
+        id: `outbox-${input.data.notificationChannelId}-${input.data.dedupeKey}`,
+      }),
     },
   };
 
@@ -126,6 +136,56 @@ test('createDeliveries sends to channels with matching rules and channels with n
 
   assert.deepEqual(createdChannelIds, ['channel-all', 'channel-pb']);
   assert.equal(deliveries.length, 2);
+});
+
+test('createOutboxItems suppresses nearby direct duplicates across adjacent time buckets', async (t) => {
+  const restore: Array<() => void> = [];
+  t.after(() => {
+    while (restore.length > 0) {
+      restore.pop()?.();
+    }
+  });
+
+  const { tx } = createBaseTransactionState();
+  const createdKeys: string[] = [];
+  const existingKeys = new Set(['channel-a|zalo|need pb roadshow|41']);
+  tx.notificationOutbox.findFirst = async (input) => {
+    const keys = input.where.dedupeKey?.in ?? [];
+    return keys.some((key) => existingKeys.has(key)) ? { id: 'outbox-existing' } : null;
+  };
+  tx.notificationOutbox.create = async (input) => {
+    createdKeys.push(input.data.dedupeKey);
+    return { id: `outbox-${createdKeys.length}` };
+  };
+
+  restore.push(
+    stubMethod(db, '$transaction', async (callback: unknown) => {
+      if (typeof callback !== 'function') {
+        throw new Error('Expected interactive transaction callback');
+      }
+
+      return (callback as (client: MockTransaction) => Promise<unknown>)(tx);
+    }),
+  );
+
+  const created = await notificationsRepository.createOutboxItems([
+    {
+      notificationChannelId: 'channel-a',
+      payload: { matchedKeywords: ['pb'] },
+      dedupeKey: 'channel-a|zalo|need pb roadshow|42',
+      dedupeConflictKeys: [
+        'channel-a|zalo|need pb roadshow|41',
+        'channel-a|zalo|need pb roadshow|42',
+        'channel-a|zalo|need pb roadshow|43',
+      ],
+      dedupeLockKey: 'channel-a|zalo|need pb roadshow',
+      dedupeWindowStart: new Date('2026-05-19T00:00:00.000Z'),
+      expiresAt: new Date('2026-05-22T00:00:00.000Z'),
+    },
+  ]);
+
+  assert.equal(created.length, 0);
+  assert.deepEqual(createdKeys, []);
 });
 
 test('createDeliveries does not send rule-filtered channels when no selected rule matches', async (t) => {

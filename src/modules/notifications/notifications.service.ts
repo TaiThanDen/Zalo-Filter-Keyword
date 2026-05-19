@@ -26,14 +26,6 @@ type TelegramConfig = {
 const runtimeStatePruneIntervalMs = 15 * 60 * 1000;
 let lastRuntimeStatePrunedAt = 0;
 
-function normalizeNotificationIdentity(value: string | null | undefined) {
-  return (value ?? "")
-    .normalize("NFKC")
-    .replace(/\s+/g, " ")
-    .trim()
-    .toLowerCase();
-}
-
 function buildChannelDestinationKey(channel: {
   id: string;
   type: "TELEGRAM" | "MESSENGER";
@@ -53,15 +45,32 @@ function buildChannelDestinationKey(channel: {
 }
 
 function buildDirectDedupeKey(destinationKey: string, input: DirectNotificationDedupeInput) {
-  const senderIdentity = normalizeNotificationIdentity(input.senderExternalId || input.senderName || "unknown_sender");
   const bucket = Math.floor(input.messageTime.getTime() / IMPLEMENTATION_DEFAULTS.notificationCrossGroupDedupeWindowMs);
 
   return [
     destinationKey,
     input.source,
-    senderIdentity,
     input.normalizedText,
     String(bucket),
+  ].join("|");
+}
+
+function buildDirectDedupeConflictKeys(destinationKey: string, input: DirectNotificationDedupeInput) {
+  const bucket = Math.floor(input.messageTime.getTime() / IMPLEMENTATION_DEFAULTS.notificationCrossGroupDedupeWindowMs);
+
+  return [-1, 0, 1].map((offset) => [
+    destinationKey,
+    input.source,
+    input.normalizedText,
+    String(bucket + offset),
+  ].join("|"));
+}
+
+function buildDirectDedupeLockKey(destinationKey: string, input: DirectNotificationDedupeInput) {
+  return [
+    destinationKey,
+    input.source,
+    input.normalizedText,
   ].join("|");
 }
 
@@ -171,6 +180,9 @@ export async function queueMatchedRuleNotifications(
       notificationChannelId: channel.id,
       payload: payload as Prisma.InputJsonValue,
       dedupeKey: buildDirectDedupeKey(destinationKey, dedupeInput),
+      dedupeConflictKeys: buildDirectDedupeConflictKeys(destinationKey, dedupeInput),
+      dedupeLockKey: buildDirectDedupeLockKey(destinationKey, dedupeInput),
+      dedupeWindowStart: new Date(Date.now() - IMPLEMENTATION_DEFAULTS.notificationCrossGroupDedupeWindowMs),
       expiresAt,
     };
   });
