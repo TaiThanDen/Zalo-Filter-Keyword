@@ -14,11 +14,13 @@ HEALTHCHECK_STATE_DIR="/root/.cache/zalo-runtime-healthcheck"
 PAUSE_WATCHER_FILE="${HEALTHCHECK_STATE_DIR}/pause-watcher"
 STALE_RESTART_STATE_FILE="${HEALTHCHECK_STATE_DIR}/last-stale-restart"
 UI_STALE_RESTART_STATE_FILE="${HEALTHCHECK_STATE_DIR}/last-ui-stale-restart"
-STALE_ERROR_PATTERN='Target page, context or browser has been closed'
+RECOVERABLE_BROWSER_ERROR_PATTERN='Target page, context or browser has been closed|browserType\.connectOverCDP: Timeout|Timeout 30000ms exceeded|browser_not_connected|healthcheck_timeout|net::ERR_ABORTED'
 STALE_ERROR_THRESHOLD=6
 STALE_ERROR_WINDOW_SECONDS=180
 STALE_RESTART_COOLDOWN_SECONDS=180
 UI_STALE_RESTART_COOLDOWN_SECONDS=180
+PAGE_HEALTHCHECK_TIMEOUT_SECONDS=25
+PROCESS_START_GRACE_SECONDS=120
 MIN_HEALTHY_ROW_COUNT=5
 WATCHER_MANAGED_PAGE_SESSION_KEY="__zalo_watcher_managed"
 export WATCHER_MANAGED_PAGE_SESSION_KEY
@@ -33,6 +35,11 @@ restart_chromium() {
 restart_watcher() {
   pm2 restart "${WATCHER_NAME}" --update-env >/dev/null 2>&1 \
     || pm2 start npm --name "${WATCHER_NAME}" -- run watcher >/dev/null 2>&1
+}
+
+pm2_uptime_seconds() {
+  local app_name="$1"
+  pm2 jlist | APP_NAME="${app_name}" node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const list=JSON.parse(s||'[]');const app=list.find(p=>p.name===process.env.APP_NAME);const started=Number(app?.pm2_env?.pm_uptime||0);console.log(started ? Math.max(0, Math.floor((Date.now()-started)/1000)) : 0)})"
 }
 
 if ! ss -ltn | grep -q "${CHROMIUM_PORT}"; then
@@ -64,6 +71,14 @@ if [ "${WATCHER_STATUS}" != "online" ]; then
   restart_watcher
 fi
 
+CHROMIUM_UPTIME_SECONDS="$(pm2_uptime_seconds "${CHROMIUM_NAME}")"
+WATCHER_UPTIME_SECONDS="$(pm2_uptime_seconds "${WATCHER_NAME}")"
+PROCESS_IN_STARTUP_GRACE=0
+
+if [ "${CHROMIUM_UPTIME_SECONDS}" -lt "${PROCESS_START_GRACE_SECONDS}" ] || [ "${WATCHER_UPTIME_SECONDS}" -lt "${PROCESS_START_GRACE_SECONDS}" ]; then
+  PROCESS_IN_STARTUP_GRACE=1
+fi
+
 NOW_EPOCH="$(date +%s)"
 UI_LAST_RESTART_EPOCH=0
 
@@ -72,7 +87,8 @@ if [ -f "${UI_STALE_RESTART_STATE_FILE}" ]; then
 fi
 
 PAGE_HEALTH_JSON="$(
-  node - <<'NODE'
+  {
+    timeout "${PAGE_HEALTHCHECK_TIMEOUT_SECONDS}s" node - <<'NODE' || printf '{"error":"healthcheck_timeout"}\n'
 const { chromium } = require('playwright-core');
 
 const WATCHER_MANAGED_PAGE_SESSION_KEY = process.env.WATCHER_MANAGED_PAGE_SESSION_KEY ?? '__zalo_watcher_managed';
@@ -93,6 +109,7 @@ function normalize(value) {
     managedSearchActive: false,
     managedActivationPrompt: false,
     managedSearchResultList: false,
+    managedChromeErrorPage: false,
   };
 
   try {
@@ -140,6 +157,10 @@ function normalize(value) {
       result.managedRowCount = Math.max(result.managedRowCount, rowCount);
 
       const normalizedBodyText = normalize(bodyText);
+      const chromeErrorPage =
+        normalizedBodyText.includes('aw, snap') ||
+        normalizedBodyText.includes('sigtrap') ||
+        normalizedBodyText.includes('something went wrong while displaying');
       const activationPrompt =
         normalizedBodyText.includes('ban dang mo zalo tren mot tab khac') ||
         normalizedBodyText.includes('nhan kich hoat de su dung tren tab nay') ||
@@ -166,6 +187,10 @@ function normalize(value) {
       if (activationPrompt) {
         result.managedActivationPrompt = true;
       }
+
+      if (chromeErrorPage) {
+        result.managedChromeErrorPage = true;
+      }
     }
 
   } catch (error) {
@@ -173,8 +198,10 @@ function normalize(value) {
   }
 
   console.log(JSON.stringify(result));
+  process.exit(0);
 })();
 NODE
+  } | tail -n 1
 )"
 
 UI_MAX_ROW_COUNT="$(
@@ -192,7 +219,13 @@ UI_MANAGED_ACTIVATION_PROMPT="$(
 UI_MANAGED_SEARCH_RESULT_LIST="$(
   printf '%s' "${PAGE_HEALTH_JSON}" | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const data=JSON.parse(s||'{}');console.log(data.managedSearchResultList ? '1' : '0')})"
 )"
-if [ "${UI_MANAGED_ACTIVATION_PROMPT}" != "1" ] && { [ "${UI_MANAGED_SEARCH_ACTIVE}" = "1" ] || [ "${UI_MANAGED_SEARCH_RESULT_LIST}" = "1" ] || [ "${UI_MANAGED_ROW_COUNT}" -lt "${MIN_HEALTHY_ROW_COUNT}" ]; }; then
+UI_MANAGED_CHROME_ERROR_PAGE="$(
+  printf '%s' "${PAGE_HEALTH_JSON}" | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const data=JSON.parse(s||'{}');console.log(data.managedChromeErrorPage ? '1' : '0')})"
+)"
+UI_HEALTHCHECK_ERROR="$(
+  printf '%s' "${PAGE_HEALTH_JSON}" | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const data=JSON.parse(s||'{}');console.log(data.error ? '1' : '0')})"
+)"
+if [ "${PROCESS_IN_STARTUP_GRACE}" != "1" ] && { { [ "${UI_HEALTHCHECK_ERROR}" = "1" ] || [ "${UI_MANAGED_CHROME_ERROR_PAGE}" = "1" ]; } || { [ "${UI_MANAGED_ACTIVATION_PROMPT}" != "1" ] && { [ "${UI_MANAGED_SEARCH_ACTIVE}" = "1" ] || [ "${UI_MANAGED_SEARCH_RESULT_LIST}" = "1" ] || { [ "${UI_MANAGED_ROW_COUNT}" -lt "${MIN_HEALTHY_ROW_COUNT}" ] && [ "${UI_MAX_ROW_COUNT}" -lt "${MIN_HEALTHY_ROW_COUNT}" ]; }; }; }; }; then
   if [ $((NOW_EPOCH - UI_LAST_RESTART_EPOCH)) -ge "${UI_STALE_RESTART_COOLDOWN_SECONDS}" ]; then
     echo "${NOW_EPOCH}" > "${UI_STALE_RESTART_STATE_FILE}"
     restart_chromium
@@ -211,7 +244,7 @@ if [ -f "${WATCHER_ERROR_LOG}" ]; then
   ERROR_LOG_MTIME="$(stat -c %Y "${WATCHER_ERROR_LOG}" 2>/dev/null || echo 0)"
 
   if [ $((NOW_EPOCH - ERROR_LOG_MTIME)) -le "${STALE_ERROR_WINDOW_SECONDS}" ]; then
-    STALE_ERROR_COUNT="$(tail -n 80 "${WATCHER_ERROR_LOG}" | grep -c "${STALE_ERROR_PATTERN}" || true)"
+    STALE_ERROR_COUNT="$(tail -n 120 "${WATCHER_ERROR_LOG}" | grep -E -c "${RECOVERABLE_BROWSER_ERROR_PATTERN}" || true)"
 
     if [ "${STALE_ERROR_COUNT}" -ge "${STALE_ERROR_THRESHOLD}" ] && [ $((NOW_EPOCH - LAST_RESTART_EPOCH)) -ge "${STALE_RESTART_COOLDOWN_SECONDS}" ]; then
       echo "${NOW_EPOCH}" > "${STALE_RESTART_STATE_FILE}"

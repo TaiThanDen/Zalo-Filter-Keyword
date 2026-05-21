@@ -938,6 +938,69 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     );
   }
 
+  private attachPageCrashHandler(page: Page) {
+    page.removeAllListeners('crash');
+    page.on('crash', () => {
+      if (this.page === page) {
+        void this.resetBrowserState('page_crashed');
+      }
+    });
+  }
+
+  private async detectZaloPageFailure(page: Page) {
+    const url = page.url();
+    const title = await page.title().catch(() => '');
+    const bodyText = await page.locator('body').innerText({ timeout: 500 }).catch(() => '');
+    const failureText = `${title}\n${bodyText}`;
+
+    if (url.startsWith('chrome-error://') || /aw,\s*snap|sigtrap|something went wrong while displaying/i.test(failureText)) {
+      return {
+        failed: true,
+        reason: 'chrome_error_page',
+        title,
+        url,
+      };
+    }
+
+    return {
+      failed: false,
+      reason: null,
+      title,
+      url,
+    };
+  }
+
+  private async reloadZaloPage(page: Page, reason: string) {
+    logger.warn('watcher_playwright_zalo_page_reloading', {
+      reason,
+      url: page.url(),
+      title: await page.title().catch(() => ''),
+    });
+
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(async () => {
+      await page.goto(env.WATCHER_ZALO_URL, { waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {});
+    });
+    await page.waitForTimeout(2_500);
+    await this.markWatcherManagedPage(page);
+  }
+
+  private async ensureUsableZaloPage(page: Page, reason: string) {
+    this.attachPageCrashHandler(page);
+
+    if (!page.url().startsWith(env.WATCHER_ZALO_URL)) {
+      await page.goto(env.WATCHER_ZALO_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 });
+      await page.waitForTimeout(5_000);
+    }
+
+    const failure = await this.detectZaloPageFailure(page);
+    if (failure.failed) {
+      await this.reloadZaloPage(page, `${reason}:${failure.reason ?? 'unknown'}`);
+    }
+
+    await this.markWatcherManagedPage(page);
+    return page;
+  }
+
   private async ensurePage() {
     if (!this.browser || !this.browser.isConnected()) {
       await this.resetBrowserState('browser_not_connected');
@@ -959,13 +1022,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     }
 
     if (this.page && !this.page.isClosed()) {
-      if (!this.page.url().startsWith(env.WATCHER_ZALO_URL)) {
-        await this.page.goto(env.WATCHER_ZALO_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 });
-        await this.page.waitForTimeout(5_000);
-      }
-
-      await this.markWatcherManagedPage(this.page);
-      return this.page;
+      return this.ensureUsableZaloPage(this.page, 'cached_page');
     }
 
     const existingZaloPages = this.context.pages().filter((page) => page.url().startsWith(env.WATCHER_ZALO_URL));
@@ -1024,13 +1081,9 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       throw new Error('No Zalo page available on the remote Chromium instance');
     }
 
-    if (!this.page.url().startsWith(env.WATCHER_ZALO_URL)) {
-      await this.page.goto(env.WATCHER_ZALO_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 });
-      await this.page.waitForTimeout(5_000);
-    }
+    await this.ensureUsableZaloPage(this.page, 'selected_page');
 
     await this.clearConversationSearch(this.page);
-    await this.markWatcherManagedPage(this.page);
 
     logger.info('watcher_playwright_attached', {
       cdpUrl: env.WATCHER_CDP_URL,
@@ -1049,6 +1102,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     const page = await this.context.newPage();
     await page.goto(env.WATCHER_ZALO_URL, { waitUntil: 'domcontentloaded', timeout: 45_000 });
     await page.waitForTimeout(5_000);
+    this.attachPageCrashHandler(page);
     await this.markWatcherManagedPage(page);
     return page;
   }
@@ -1604,8 +1658,15 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
   }
 
   private async readConversationCategories(page: Page) {
+    const normalizedLabelsByKey = Object.fromEntries(
+      Object.entries(CONVERSATION_CATEGORY_LABELS).map(([key, labels]) => [
+        key,
+        labels.map((label) => normalizeSearchLabel(label)),
+      ]),
+    ) as Record<ConversationCategoryKey, string[]>;
+
     return page
-      .evaluate((labelsByKey) => {
+      .evaluate((normalizedLabelsByKey) => {
         const normalize = (value: string | null) =>
           (value ?? '')
             .normalize('NFD')
@@ -1615,9 +1676,9 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
             .toLowerCase();
         const labelToKey = new Map<string, ConversationCategoryKey>();
 
-        for (const [key, labels] of Object.entries(labelsByKey) as Array<[ConversationCategoryKey, string[]]>) {
+        for (const [key, labels] of Object.entries(normalizedLabelsByKey) as Array<[ConversationCategoryKey, string[]]>) {
           for (const label of labels) {
-            labelToKey.set(normalize(label), key);
+            labelToKey.set(label, key);
           }
         }
 
@@ -1632,11 +1693,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         };
         const getClickable = (element: HTMLElement) =>
           (element.closest('.tab-item, [role="tab"], button, a') as HTMLElement | null) ?? element;
-        const candidates = Array.from(
-          document.querySelectorAll<HTMLElement>(
-            '.msg-filters-bar .tab-item, .tab-main .tab-item, .msg-filters-bar [role="tab"], .tab-main [role="tab"]',
-          ),
-        );
+        const candidates = Array.from(document.querySelectorAll<HTMLElement>('.tab-item, [role="tab"], button, a'));
         const seen = new Set<ConversationCategoryKey>();
         const categories: ConversationCategoryDomItem[] = [];
 
@@ -1667,14 +1724,62 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         }
 
         return categories;
-      }, CONVERSATION_CATEGORY_LABELS)
+      }, normalizedLabelsByKey)
       .catch(() => [] as ConversationCategoryDomItem[]);
   }
 
   private async switchConversationCategory(page: Page, categoryKey: ConversationCategoryKey) {
-    const switched = await page
+    const targetLabels = (CONVERSATION_CATEGORY_LABELS[categoryKey] ?? []).map((label) => normalizeSearchLabel(label));
+    const tabIndex = categoryKey === 'other' ? 1 : 0;
+    const directTabTarget = await page
+      .evaluate((tabIndex) => {
+        const tabs = Array.from(document.querySelectorAll<HTMLElement>('.tab-main .tab-item'));
+        const tab = tabs[tabIndex] ?? null;
+
+        if (!tab) {
+          return null;
+        }
+
+        const className = String(tab.getAttribute('class') ?? '');
+        const ariaSelected = tab.getAttribute('aria-selected');
+        const rect = tab.getBoundingClientRect();
+
+        return {
+          alreadyActive: ariaSelected === 'true' || /\b(active|selected)\b/i.test(className),
+          x: rect.left + rect.width / 2,
+          y: rect.top + rect.height / 2,
+        };
+      }, tabIndex)
+      .catch(() => null);
+
+    if (directTabTarget) {
+      if (!directTabTarget.alreadyActive) {
+        await page.mouse.click(directTabTarget.x, directTabTarget.y).catch(() => {});
+        await page.waitForTimeout(550);
+      }
+
+      const selected = await page
+        .evaluate((tabIndex) => {
+          const tabs = Array.from(document.querySelectorAll<HTMLElement>('.tab-main .tab-item'));
+          const tab = tabs[tabIndex] ?? null;
+
+          if (!tab) {
+            return false;
+          }
+
+          const className = String(tab.getAttribute('class') ?? '');
+          return tab.getAttribute('aria-selected') === 'true' || /\b(active|selected)\b/i.test(className);
+        }, tabIndex)
+        .catch(() => false);
+
+      if (selected) {
+        return true;
+      }
+    }
+
+    const target = await page
       .evaluate(
-        ({ labelsByKey, categoryKey }) => {
+        ({ targetLabels }) => {
           const normalize = (value: string | null) =>
             (value ?? '')
               .normalize('NFD')
@@ -1682,7 +1787,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
               .replace(/\s+/g, ' ')
               .trim()
               .toLowerCase();
-          const targetLabels = new Set((labelsByKey[categoryKey] ?? []).map((label) => normalize(label)));
+          const targetLabelSet = new Set(targetLabels);
           const isVisible = (element: Element | null) => {
             if (!(element instanceof HTMLElement)) {
               return false;
@@ -1692,15 +1797,11 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
             const style = window.getComputedStyle(element);
             return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
           };
-          const candidates = Array.from(
-            document.querySelectorAll<HTMLElement>(
-              '.msg-filters-bar .tab-item, .tab-main .tab-item, .msg-filters-bar [role="tab"], .tab-main [role="tab"]',
-            ),
-          );
+          const candidates = Array.from(document.querySelectorAll<HTMLElement>('.tab-main .tab-item, .tab-item, [role="tab"], button, a'));
 
           for (const candidate of candidates) {
             const label = (candidate.innerText || candidate.textContent || '').trim();
-            if (!label || label.length > 40 || !targetLabels.has(normalize(label)) || !isVisible(candidate)) {
+            if (!label || label.length > 40 || !targetLabelSet.has(normalize(label)) || !isVisible(candidate)) {
               continue;
             }
 
@@ -1709,22 +1810,75 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
               continue;
             }
 
-            clickable.click();
-            return true;
+            const className = String(clickable.getAttribute('class') ?? '');
+            const ariaSelected = clickable.getAttribute('aria-selected');
+            const rect = clickable.getBoundingClientRect();
+            const target = {
+              alreadyActive: ariaSelected === 'true' || /\b(active|selected)\b/i.test(className),
+              x: rect.left + rect.width / 2,
+              y: rect.top + rect.height / 2,
+            };
+
+            if (ariaSelected === 'true' || /\b(active|selected)\b/i.test(className)) {
+              return target;
+            }
+
+            return target;
           }
 
-          return false;
+          return null;
         },
-        { labelsByKey: CONVERSATION_CATEGORY_LABELS, categoryKey },
+        { targetLabels },
       )
-      .catch(() => false);
+      .catch(() => null);
 
-    if (!switched) {
+    if (!target) {
       return false;
     }
 
-    await page.waitForTimeout(450);
-    return true;
+    if (!target.alreadyActive) {
+      await page.mouse.click(target.x, target.y).catch(() => {});
+      await page.waitForTimeout(550);
+    }
+
+    return page
+      .evaluate(
+        ({ targetLabels }) => {
+          const normalize = (value: string | null) =>
+            (value ?? '')
+              .normalize('NFD')
+              .replace(/\p{Diacritic}/gu, '')
+              .replace(/\s+/g, ' ')
+              .trim()
+              .toLowerCase();
+          const targetLabelSet = new Set(targetLabels);
+          const candidates = Array.from(document.querySelectorAll<HTMLElement>('.tab-main .tab-item, .tab-item, [role="tab"]'));
+
+          return candidates.some((candidate) => {
+            const label = (candidate.innerText || candidate.textContent || '').trim();
+            if (!label || !targetLabelSet.has(normalize(label))) {
+              return false;
+            }
+
+            const className = String(candidate.getAttribute('class') ?? '');
+            return candidate.getAttribute('aria-selected') === 'true' || /\b(active|selected)\b/i.test(className);
+          });
+        },
+        { targetLabels },
+      )
+      .catch(() => !target.alreadyActive);
+  }
+
+  private async switchToPreferredSidebarCategory(page: Page, reason: string) {
+    const switched = await this.switchConversationCategory(page, 'other');
+
+    logger.info('watcher_conversation_category_home_selected', {
+      categoryKey: 'other',
+      reason,
+      switched,
+    });
+
+    return switched;
   }
 
   private async ensureConversationRowVisible(page: Page, conversationId: string) {
@@ -1957,7 +2111,9 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       totalSnapshots: snapshots.size,
     });
 
-    return Array.from(snapshots.values()).slice(0, totalLimit);
+    await this.switchToPreferredSidebarCategory(page, 'after_live_scan');
+
+    return Array.from(snapshots.values());
   }
 
   private async collectSnapshotsFromCurrentCategory(page: Page, limit: number) {
@@ -2077,6 +2233,8 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       scanSummary,
       totalSnapshots: snapshots.size,
     });
+
+    await this.switchToPreferredSidebarCategory(page, 'after_discovery_scan');
 
     return Array.from(snapshots.values());
   }
@@ -2416,6 +2574,8 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         },
       });
     }
+
+    await this.switchToPreferredSidebarCategory(page, 'after_poll');
 
     if (stateChanged) {
       await this.persistState();

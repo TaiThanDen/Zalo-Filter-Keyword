@@ -31,7 +31,11 @@ detect_display() {
   printf ':1\n'
 }
 
-export DISPLAY="${DISPLAY:-$(detect_display)}"
+if [ -n "${DISPLAY:-}" ] && [ -S "/tmp/.X11-unix/X${DISPLAY#:}" ]; then
+  export DISPLAY
+else
+  export DISPLAY="$(detect_display)"
+fi
 export XAUTHORITY="${XAUTHORITY:-/root/.Xauthority}"
 WATCHER_PROFILE_DIR="${WATCHER_PROFILE_DIR:-/root/.cache/zalo-watcher-chromium-profile}"
 PROFILE_TEMPLATE_DIR="${PROFILE_TEMPLATE_DIR:-/root/snap/chromium/common/chromium}"
