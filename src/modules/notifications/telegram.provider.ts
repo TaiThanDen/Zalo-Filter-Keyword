@@ -42,13 +42,53 @@ function preserveReadableLines(value: string) {
     .trim();
 }
 
-function renderTelegramMessage(payload: NotificationPayload) {
-  const safeText = escapeHtml(preserveReadableLines(payload.messageText));
+const ZALO_REACTION_COMMANDS = new Set(['/-strong', '/-heart', ':>', ':o', ':-((', ':-h']);
+const TRAILING_CLOCK_LINE_PATTERN = /^(?:[01]?\d|2[0-3]):[0-5]\d$/;
+
+function isTrailingReactionLine(value: string) {
+  const trimmed = value.trim();
+
+  if (!trimmed) {
+    return true;
+  }
+
+  if (ZALO_REACTION_COMMANDS.has(trimmed)) {
+    return true;
+  }
+
+  const compact = trimmed.replace(/\s+/g, '');
+  return /[\p{Extended_Pictographic}\uFE0F]/u.test(compact) && !/[\p{L}\p{N}]/u.test(compact);
+}
+
+export function sanitizeTelegramMessageText(value: string) {
+  const lines = preserveReadableLines(value).split('\n');
+  let removedTrailingReaction = false;
+
+  while (lines.length > 0 && isTrailingReactionLine(lines[lines.length - 1] ?? '')) {
+    removedTrailingReaction = true;
+    lines.pop();
+  }
+
+  if (lines.length > 0 && TRAILING_CLOCK_LINE_PATTERN.test((lines[lines.length - 1] ?? '').trim())) {
+    lines.pop();
+  }
+
+  if (!removedTrailingReaction) {
+    return lines.join('\n').trim();
+  }
+
+  while (lines.length > 0 && isTrailingReactionLine(lines[lines.length - 1] ?? '')) {
+    lines.pop();
+  }
+
+  return lines.join('\n').trim();
+}
+
+export function renderTelegramMessage(payload: NotificationPayload) {
+  const safeText = escapeHtml(sanitizeTelegramMessageText(payload.messageText));
   const safeKeywords = payload.matchedKeywords.map((keyword) => escapeHtml(keyword)).join(', ');
 
   return [
-    '<b>[ZALO ALERT]</b>',
-    '',
     `<b>Nhóm:</b> ${escapeHtml(payload.groupName)}`,
     `<b>Người gửi:</b> ${escapeHtml(payload.senderName)}`,
     `<b>Thời gian:</b> ${escapeHtml(formatVietnamTime(payload.messageTime))}`,
