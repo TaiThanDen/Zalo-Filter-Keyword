@@ -244,7 +244,32 @@ if [ -f "${WATCHER_ERROR_LOG}" ]; then
   ERROR_LOG_MTIME="$(stat -c %Y "${WATCHER_ERROR_LOG}" 2>/dev/null || echo 0)"
 
   if [ $((NOW_EPOCH - ERROR_LOG_MTIME)) -le "${STALE_ERROR_WINDOW_SECONDS}" ]; then
-    STALE_ERROR_COUNT="$(tail -n 120 "${WATCHER_ERROR_LOG}" | grep -E -c "${RECOVERABLE_BROWSER_ERROR_PATTERN}" || true)"
+    STALE_ERROR_COUNT="$(
+      tail -n 120 "${WATCHER_ERROR_LOG}" |
+        NOW_EPOCH="${NOW_EPOCH}" \
+        STALE_ERROR_WINDOW_SECONDS="${STALE_ERROR_WINDOW_SECONDS}" \
+        RECOVERABLE_BROWSER_ERROR_PATTERN="${RECOVERABLE_BROWSER_ERROR_PATTERN}" \
+        node -e '
+          let input = "";
+          process.stdin.on("data", (chunk) => (input += chunk));
+          process.stdin.on("end", () => {
+            const now = Number(process.env.NOW_EPOCH || 0) * 1000;
+            const windowMs = Number(process.env.STALE_ERROR_WINDOW_SECONDS || 0) * 1000;
+            const pattern = new RegExp(process.env.RECOVERABLE_BROWSER_ERROR_PATTERN || "$");
+            const count = input.split(/\r?\n/).filter((line) => {
+              if (!pattern.test(line)) return false;
+
+              try {
+                const timestamp = Date.parse(JSON.parse(line).timestamp || "");
+                return Number.isFinite(timestamp) && timestamp >= now - windowMs && timestamp <= now;
+              } catch {
+                return false;
+              }
+            }).length;
+            console.log(count);
+          });
+        '
+    )"
 
     if [ "${STALE_ERROR_COUNT}" -ge "${STALE_ERROR_THRESHOLD}" ] && [ $((NOW_EPOCH - LAST_RESTART_EPOCH)) -ge "${STALE_RESTART_COOLDOWN_SECONDS}" ]; then
       echo "${NOW_EPOCH}" > "${STALE_RESTART_STATE_FILE}"
