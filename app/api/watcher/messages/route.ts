@@ -4,6 +4,8 @@ import { requireWatcherAuth } from "@/src/server/guards/watcher.guard";
 import { ingestMessageSchema } from "@/src/modules/messages/messages.schemas";
 import { ingestInboundMessage } from "@/src/modules/messages/messages.service";
 
+export const maxDuration = 15;
+
 export async function POST(request: Request) {
   try {
     const watcher = await requireWatcherAuth(request.headers.get("authorization"));

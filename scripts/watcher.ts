@@ -1,5 +1,6 @@
 import { appendFile, readFile, unlink } from "node:fs/promises";
 import { env } from "@/src/config/env";
+import { IMPLEMENTATION_DEFAULTS } from "@/src/config/constants";
 import { logger } from "@/src/lib/logger";
 import {
   createSourceAdapter,
@@ -14,6 +15,7 @@ async function fetchConfig() {
     headers: {
       Authorization: `Bearer ${env.WATCHER_API_KEY}`,
     },
+    signal: AbortSignal.timeout(env.WATCHER_CONTROL_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -64,6 +66,7 @@ async function sendHeartbeat() {
       version: env.WATCHER_VERSION,
       status: "online",
     }),
+    signal: AbortSignal.timeout(env.WATCHER_CONTROL_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -79,6 +82,7 @@ async function syncGroups(groups: DiscoveredSourceGroup[]) {
       Authorization: `Bearer ${env.WATCHER_API_KEY}`,
     },
     body: JSON.stringify({ groups }),
+    signal: AbortSignal.timeout(env.WATCHER_CONTROL_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -116,34 +120,81 @@ async function flushBuffer(sendMessage: (payload: SourceMessageEvent) => Promise
 }
 
 async function sendMessage(payload: SourceMessageEvent) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), env.WATCHER_INGEST_TIMEOUT_MS);
+  let lastError: unknown;
 
-  try {
-    const response = await fetch(`${env.WATCHER_API_BASE_URL}/api/watcher/messages`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${env.WATCHER_API_KEY}`,
-      },
-      body: JSON.stringify(payload),
-      signal: controller.signal,
-    });
+  for (let attempt = 1; attempt <= IMPLEMENTATION_DEFAULTS.watcherMessageMaxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), env.WATCHER_INGEST_TIMEOUT_MS);
 
-    if (!response.ok) {
-      throw new Error(`Watcher ingest failed with status ${response.status}`);
+    try {
+      const response = await fetch(`${env.WATCHER_API_BASE_URL}/api/watcher/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${env.WATCHER_API_KEY}`,
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Watcher ingest failed with status ${response.status}`);
+      }
+
+      logger.info("watcher_message_sent", {
+        messageExternalId: payload.messageExternalId,
+        groupExternalId: payload.groupExternalId,
+        attempt,
+      });
+      return;
+    } catch (error) {
+      lastError = error;
+
+      if (attempt < IMPLEMENTATION_DEFAULTS.watcherMessageMaxAttempts) {
+        const retryDelayMs = Math.min(
+          env.WATCHER_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1),
+          env.WATCHER_RETRY_MAX_DELAY_MS,
+        );
+        logger.warn("watcher_message_retry_scheduled", {
+          messageExternalId: payload.messageExternalId,
+          groupExternalId: payload.groupExternalId,
+          attempt,
+          retryDelayMs,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+    } finally {
+      clearTimeout(timeout);
     }
-
-    logger.info("watcher_message_sent", {
-      messageExternalId: payload.messageExternalId,
-      groupExternalId: payload.groupExternalId,
-    });
-  } catch (error) {
-    await bufferPayload(payload);
-    throw error;
-  } finally {
-    clearTimeout(timeout);
   }
+
+  await bufferPayload(payload);
+  throw lastError;
+}
+
+function scheduleRecurringTask(
+  eventName: string,
+  intervalMs: number,
+  task: () => Promise<void>,
+) {
+  const run = async () => {
+    try {
+      await task();
+    } catch (error) {
+      logger.warn(`${eventName}_failed`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setTimeout(() => {
+        void run();
+      }, intervalMs);
+    }
+  };
+
+  setTimeout(() => {
+    void run();
+  }, intervalMs);
 }
 
 function shouldSyncGroupsFromBrowser() {
@@ -187,34 +238,17 @@ async function main() {
     await syncGroupsFromAdapter(adapter);
   }
 
-  setInterval(() => {
-    sendHeartbeat().catch((error) => {
-      logger.warn("watcher_heartbeat_failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-    });
-  }, env.WATCHER_HEARTBEAT_INTERVAL_MS);
+  scheduleRecurringTask("watcher_heartbeat", env.WATCHER_HEARTBEAT_INTERVAL_MS, sendHeartbeat);
 
-  setInterval(() => {
-    fetchConfig()
-      .then(async (config) => {
-        await adapter.seedKnownGroups?.(toSeedableGroups(config));
-        await adapter.seedRules?.(toSeedableRules(config));
-      })
-      .catch((error) => {
-      logger.warn("watcher_config_refresh_failed", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      });
+  scheduleRecurringTask("watcher_config_refresh", env.WATCHER_CONFIG_SYNC_INTERVAL_MS, async () => {
+    const refreshedConfig = await fetchConfig();
+    await adapter.seedKnownGroups?.(toSeedableGroups(refreshedConfig));
+    await adapter.seedRules?.(toSeedableRules(refreshedConfig));
 
     if (shouldSyncGroupsFromBrowser()) {
-      syncGroupsFromAdapter(adapter).catch((error) => {
-        logger.warn("watcher_group_sync_failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-      });
+      await syncGroupsFromAdapter(adapter);
     }
-  }, env.WATCHER_CONFIG_SYNC_INTERVAL_MS);
+  });
 }
 
 main().catch((error) => {

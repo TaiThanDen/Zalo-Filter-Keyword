@@ -1,7 +1,7 @@
 import { AppError } from "@/src/lib/errors";
 import { authenticateWatcherApiKey } from "@/src/modules/watchers/watchers.service";
 
-export async function requireWatcherAuth(authorizationHeader: string | null) {
+export function requireWatcherApiKey(authorizationHeader: string | null) {
   if (!authorizationHeader?.startsWith("Bearer ")) {
     throw new AppError("UNAUTHORIZED", "Watcher bearer token is required", 401);
   }
@@ -12,5 +12,9 @@ export async function requireWatcherAuth(authorizationHeader: string | null) {
     throw new AppError("UNAUTHORIZED", "Watcher bearer token is required", 401);
   }
 
-  return authenticateWatcherApiKey(apiKey);
+  return apiKey;
+}
+
+export async function requireWatcherAuth(authorizationHeader: string | null) {
+  return authenticateWatcherApiKey(requireWatcherApiKey(authorizationHeader));
 }

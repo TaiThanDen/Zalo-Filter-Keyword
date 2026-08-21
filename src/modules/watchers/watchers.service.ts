@@ -1,4 +1,4 @@
-import { ChannelType, WatcherReportedStatus } from "@prisma/client";
+import { ChannelType, Prisma, WatcherReportedStatus } from "@prisma/client";
 import { env } from "@/src/config/env";
 import { IMPLEMENTATION_DEFAULTS } from "@/src/config/constants";
 import { db } from "@/src/lib/db";
@@ -19,18 +19,22 @@ export async function authenticateWatcherApiKey(apiKey: string) {
   return watcher;
 }
 
-export function deriveWatcherStatus(lastHeartbeatAt: Date | null, reportedStatus?: WatcherReportedStatus) {
+export function deriveWatcherStatus(lastHeartbeatAt: Date | null) {
   const age = ageInMilliseconds(lastHeartbeatAt);
+  const onlineThresholdMs = Math.max(
+    IMPLEMENTATION_DEFAULTS.watcherStatusThresholdsMs.online,
+    env.WATCHER_HEARTBEAT_INTERVAL_MS * 1.5,
+  );
+  const degradedThresholdMs = Math.max(
+    IMPLEMENTATION_DEFAULTS.watcherStatusThresholdsMs.degraded,
+    env.WATCHER_HEARTBEAT_INTERVAL_MS * 3,
+  );
 
-  if (age <= IMPLEMENTATION_DEFAULTS.watcherStatusThresholdsMs.online) {
+  if (age <= onlineThresholdMs) {
     return "online";
   }
 
-  if (age <= IMPLEMENTATION_DEFAULTS.watcherStatusThresholdsMs.degraded) {
-    return "degraded";
-  }
-
-  if (reportedStatus === WatcherReportedStatus.ONLINE && age <= env.WATCHER_HEARTBEAT_INTERVAL_MS * 5) {
+  if (age <= degradedThresholdMs) {
     return "degraded";
   }
 
@@ -47,7 +51,7 @@ export async function listWatchers() {
 
   return watchers.map((watcher) => ({
     ...watcher,
-    status: deriveWatcherStatus(watcher.lastHeartbeatAt, watcher.reportedStatus),
+    status: deriveWatcherStatus(watcher.lastHeartbeatAt),
   }));
 }
 
@@ -72,6 +76,37 @@ export async function recordHeartbeat(
       reportedStatus,
     },
   });
+}
+
+export async function recordAuthenticatedHeartbeat(
+  apiKey: string,
+  input: { version: string; status: "online" | "degraded" | "offline" },
+  ipAddress?: string | null,
+) {
+  const reportedStatus =
+    input.status === "online"
+      ? WatcherReportedStatus.ONLINE
+      : input.status === "degraded"
+        ? WatcherReportedStatus.DEGRADED
+        : WatcherReportedStatus.OFFLINE;
+
+  try {
+    return await db.watcher.update({
+      where: { apiKeyHash: sha256(apiKey) },
+      data: {
+        lastHeartbeatAt: new Date(),
+        lastVersion: input.version,
+        lastSeenIp: ipAddress ?? null,
+        reportedStatus,
+      },
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2025") {
+      throw new AppError("UNAUTHORIZED", "Invalid watcher credentials", 401);
+    }
+
+    throw error;
+  }
 }
 
 export async function syncWatcherGroups(

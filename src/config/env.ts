@@ -4,6 +4,29 @@ import { IMPLEMENTATION_DEFAULTS } from "@/src/config/constants";
 
 loadEnvConfig(process.cwd());
 
+export function estimateWatcherMessageDeliveryDelayMs(input: {
+  pollIntervalMs: number;
+  ingestTimeoutMs: number;
+  retryBaseDelayMs: number;
+  retryMaxDelayMs: number;
+}) {
+  let retryDelayMs = 0;
+
+  for (let attempt = 1; attempt < IMPLEMENTATION_DEFAULTS.watcherMessageMaxAttempts; attempt += 1) {
+    retryDelayMs += Math.min(
+      input.retryBaseDelayMs * 2 ** (attempt - 1),
+      input.retryMaxDelayMs,
+    );
+  }
+
+  return (
+    input.pollIntervalMs +
+    input.ingestTimeoutMs * IMPLEMENTATION_DEFAULTS.watcherMessageMaxAttempts +
+    retryDelayMs +
+    IMPLEMENTATION_DEFAULTS.watcherMessageProcessingBudgetMs
+  );
+}
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   APP_BASE_URL: z.string().url().default("http://localhost:3000"),
@@ -17,8 +40,9 @@ const envSchema = z.object({
   WATCHER_API_KEY: z.string().min(8).default("change_me"),
   WATCHER_NODE_NAME: z.string().min(1).default("watcher-main"),
   WATCHER_VERSION: z.string().min(1).default("0.1.0"),
-  WATCHER_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
-  WATCHER_CONFIG_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
+  WATCHER_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
+  WATCHER_CONFIG_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(600_000),
+  WATCHER_CONTROL_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   WATCHER_INGEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   WATCHER_RETRY_BASE_DELAY_MS: z.coerce.number().int().positive().default(1_000),
   WATCHER_RETRY_MAX_DELAY_MS: z.coerce.number().int().positive().default(30_000),
@@ -27,7 +51,7 @@ const envSchema = z.object({
   WATCHER_CDP_URL: z.string().url().default("http://127.0.0.1:9222"),
   WATCHER_ZALO_URL: z.string().url().default("https://chat.zalo.me/"),
   WATCHER_PLAYWRIGHT_STATE_FILE: z.string().default("./data/watcher-playwright-state.json"),
-  WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(10_000),
+  WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   WATCHER_PLAYWRIGHT_VISIBLE_ITEM_LIMIT: z.coerce.number().int().positive().default(15),
   WATCHER_PLAYWRIGHT_MAX_CONVERSATIONS_PER_POLL: z.coerce.number().int().positive().default(6),
   WATCHER_PLAYWRIGHT_FAST_PREVIEW_ONLY: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),
@@ -39,6 +63,21 @@ const envSchema = z.object({
   NOTIFICATION_MAX_ATTEMPTS: z.coerce.number().int().positive().default(IMPLEMENTATION_DEFAULTS.notificationMaxAttempts),
   NEXT_PUBLIC_SUPABASE_URL: z.string().url().optional(),
   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: z.string().min(1).optional(),
+}).superRefine((value, context) => {
+  const estimatedDelayMs = estimateWatcherMessageDeliveryDelayMs({
+    pollIntervalMs: value.WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS,
+    ingestTimeoutMs: value.WATCHER_INGEST_TIMEOUT_MS,
+    retryBaseDelayMs: value.WATCHER_RETRY_BASE_DELAY_MS,
+    retryMaxDelayMs: value.WATCHER_RETRY_MAX_DELAY_MS,
+  });
+
+  if (estimatedDelayMs > IMPLEMENTATION_DEFAULTS.watcherMessageDeliverySloMs) {
+    context.addIssue({
+      code: "custom",
+      path: ["WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS"],
+      message: `Watcher delivery budget is ${estimatedDelayMs}ms, exceeding ${IMPLEMENTATION_DEFAULTS.watcherMessageDeliverySloMs}ms`,
+    });
+  }
 });
 
 const parsed = envSchema.safeParse(process.env);

@@ -3,6 +3,8 @@ import { requireWatcherAuth } from "@/src/server/guards/watcher.guard";
 import { watcherGroupSyncSchema } from "@/src/modules/watchers/watchers.schemas";
 import { syncWatcherGroups } from "@/src/modules/watchers/watchers.service";
 
+export const maxDuration = 30;
+
 export async function POST(request: Request) {
   try {
     const watcher = await requireWatcherAuth(request.headers.get("authorization"));

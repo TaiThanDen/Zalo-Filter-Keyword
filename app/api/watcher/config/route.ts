@@ -2,6 +2,8 @@ import { handleRouteError, ok } from "@/src/lib/http";
 import { requireWatcherAuth } from "@/src/server/guards/watcher.guard";
 import { getWatcherConfig } from "@/src/modules/watchers/watchers.service";
 
+export const maxDuration = 15;
+
 export async function GET(request: Request) {
   try {
     const watcher = await requireWatcherAuth(request.headers.get("authorization"));
