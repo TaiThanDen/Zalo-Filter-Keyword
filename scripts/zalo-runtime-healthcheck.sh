@@ -225,7 +225,7 @@ UI_MANAGED_CHROME_ERROR_PAGE="$(
 UI_HEALTHCHECK_ERROR="$(
   printf '%s' "${PAGE_HEALTH_JSON}" | node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>{const data=JSON.parse(s||'{}');console.log(data.error ? '1' : '0')})"
 )"
-if [ "${PROCESS_IN_STARTUP_GRACE}" != "1" ] && { { [ "${UI_HEALTHCHECK_ERROR}" = "1" ] || [ "${UI_MANAGED_CHROME_ERROR_PAGE}" = "1" ]; } || { [ "${UI_MANAGED_ACTIVATION_PROMPT}" != "1" ] && { [ "${UI_MANAGED_SEARCH_ACTIVE}" = "1" ] || [ "${UI_MANAGED_SEARCH_RESULT_LIST}" = "1" ] || { [ "${UI_MANAGED_ROW_COUNT}" -lt "${MIN_HEALTHY_ROW_COUNT}" ] && [ "${UI_MAX_ROW_COUNT}" -lt "${MIN_HEALTHY_ROW_COUNT}" ]; }; }; }; }; then
+if [ "${PROCESS_IN_STARTUP_GRACE}" != "1" ] && { [ "${UI_MANAGED_CHROME_ERROR_PAGE}" = "1" ] || { [ "${UI_HEALTHCHECK_ERROR}" != "1" ] && [ "${UI_MANAGED_ACTIVATION_PROMPT}" != "1" ] && { [ "${UI_MANAGED_SEARCH_ACTIVE}" = "1" ] || [ "${UI_MANAGED_SEARCH_RESULT_LIST}" = "1" ] || { [ "${UI_MANAGED_ROW_COUNT}" -lt "${MIN_HEALTHY_ROW_COUNT}" ] && [ "${UI_MAX_ROW_COUNT}" -lt "${MIN_HEALTHY_ROW_COUNT}" ]; }; }; }; }; then
   if [ $((NOW_EPOCH - UI_LAST_RESTART_EPOCH)) -ge "${UI_STALE_RESTART_COOLDOWN_SECONDS}" ]; then
     echo "${NOW_EPOCH}" > "${UI_STALE_RESTART_STATE_FILE}"
     restart_chromium
