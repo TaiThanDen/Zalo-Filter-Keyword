@@ -15,6 +15,7 @@ export async function GET() {
         lastHeartbeatAt: watcher.lastHeartbeatAt,
         lastSeenIp: watcher.lastSeenIp,
         lastVersion: watcher.lastVersion,
+        sleepSchedule: watcher.sleepSchedule,
         groups: watcher.groups.map((group) => ({
           id: group.id,
           name: group.name,

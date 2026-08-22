@@ -11,3 +11,10 @@ export const ingestMessageSchema = z.object({
   messageTime: z.string().datetime(),
   rawPayload: z.unknown().optional(),
 });
+
+export const ingestMessagesRequestSchema = z.union([
+  ingestMessageSchema,
+  z.object({
+    messages: z.array(ingestMessageSchema).min(1).max(10),
+  }),
+]);

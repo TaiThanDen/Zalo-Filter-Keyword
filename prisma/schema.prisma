@@ -83,8 +83,20 @@ model Watcher {
   lastVersion     String?
   groups          Group[]
   inboundMessages InboundMessage[]
+  runtimeConfig   WatcherRuntimeConfig?
   createdAt       DateTime              @default(now())
   updatedAt       DateTime              @updatedAt
+}
+
+model WatcherRuntimeConfig {
+  watcherId        String   @id
+  sleepEnabled     Boolean  @default(false)
+  sleepStartMinute Int      @default(60)
+  sleepEndMinute   Int      @default(360)
+  sleepTimezone    String   @default("Asia/Ho_Chi_Minh")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  watcher          Watcher  @relation(fields: [watcherId], references: [id], onDelete: Cascade)
 }
 
 model Group {

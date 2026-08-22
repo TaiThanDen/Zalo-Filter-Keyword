@@ -3,6 +3,11 @@ import { env } from "@/src/config/env";
 import { IMPLEMENTATION_DEFAULTS } from "@/src/config/constants";
 import { logger } from "@/src/lib/logger";
 import {
+  DEFAULT_WATCHER_SLEEP_SCHEDULE,
+  isWithinWatcherSleepSchedule,
+  type WatcherSleepSchedule,
+} from "@/src/modules/watchers/watcher-schedule";
+import {
   createSourceAdapter,
   type DiscoveredSourceGroup,
   type SourceAdapter,
@@ -55,7 +60,7 @@ function toSeedableRules(config: unknown): SourceRule[] {
     }));
 }
 
-async function sendHeartbeat() {
+async function sendHeartbeat(status: "online" | "offline" = "online") {
   const response = await fetch(`${env.WATCHER_API_BASE_URL}/api/watcher/heartbeat`, {
     method: "POST",
     headers: {
@@ -64,7 +69,7 @@ async function sendHeartbeat() {
     },
     body: JSON.stringify({
       version: env.WATCHER_VERSION,
-      status: "online",
+      status,
     }),
     signal: AbortSignal.timeout(env.WATCHER_CONTROL_REQUEST_TIMEOUT_MS),
   });
@@ -72,6 +77,36 @@ async function sendHeartbeat() {
   if (!response.ok) {
     throw new Error(`Watcher heartbeat failed with status ${response.status}`);
   }
+}
+
+function toSleepSchedule(config: unknown): WatcherSleepSchedule {
+  if (!config || typeof config !== "object") {
+    return { ...DEFAULT_WATCHER_SLEEP_SCHEDULE };
+  }
+
+  const schedule = (config as { sleepSchedule?: unknown }).sleepSchedule;
+
+  if (!schedule || typeof schedule !== "object") {
+    return { ...DEFAULT_WATCHER_SLEEP_SCHEDULE };
+  }
+
+  const candidate = schedule as Record<string, unknown>;
+
+  if (
+    typeof candidate.enabled !== "boolean" ||
+    !Number.isInteger(candidate.startMinute) ||
+    !Number.isInteger(candidate.endMinute) ||
+    typeof candidate.timezone !== "string"
+  ) {
+    return { ...DEFAULT_WATCHER_SLEEP_SCHEDULE };
+  }
+
+  return {
+    enabled: candidate.enabled,
+    startMinute: candidate.startMinute as number,
+    endMinute: candidate.endMinute as number,
+    timezone: candidate.timezone,
+  };
 }
 
 async function syncGroups(groups: DiscoveredSourceGroup[]) {
@@ -100,7 +135,7 @@ async function bufferPayload(payload: SourceMessageEvent) {
   await appendFile(env.WATCHER_BUFFER_FILE_PATH, `${JSON.stringify(payload)}\n`, "utf8");
 }
 
-async function flushBuffer(sendMessage: (payload: SourceMessageEvent) => Promise<void>) {
+async function flushBuffer(sendMessages: (payloads: SourceMessageEvent[]) => Promise<void>) {
   if (!env.WATCHER_BUFFER_FILE_ENABLED) {
     return;
   }
@@ -109,8 +144,10 @@ async function flushBuffer(sendMessage: (payload: SourceMessageEvent) => Promise
     const content = await readFile(env.WATCHER_BUFFER_FILE_PATH, "utf8");
     const lines = content.split(/\r?\n/).filter(Boolean);
 
-    for (const line of lines) {
-      await sendMessage(JSON.parse(line) as SourceMessageEvent);
+    const payloads = lines.map((line) => JSON.parse(line) as SourceMessageEvent);
+
+    for (let index = 0; index < payloads.length; index += 10) {
+      await sendMessages(payloads.slice(index, index + 10));
     }
 
     await unlink(env.WATCHER_BUFFER_FILE_PATH);
@@ -119,7 +156,11 @@ async function flushBuffer(sendMessage: (payload: SourceMessageEvent) => Promise
   }
 }
 
-async function sendMessage(payload: SourceMessageEvent) {
+async function deliverMessages(payloads: SourceMessageEvent[]) {
+  if (payloads.length === 0) {
+    return;
+  }
+
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= IMPLEMENTATION_DEFAULTS.watcherMessageMaxAttempts; attempt += 1) {
@@ -133,7 +174,7 @@ async function sendMessage(payload: SourceMessageEvent) {
           "Content-Type": "application/json",
           Authorization: `Bearer ${env.WATCHER_API_KEY}`,
         },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ messages: payloads }),
         signal: controller.signal,
       });
 
@@ -141,11 +182,14 @@ async function sendMessage(payload: SourceMessageEvent) {
         throw new Error(`Watcher ingest failed with status ${response.status}`);
       }
 
-      logger.info("watcher_message_sent", {
-        messageExternalId: payload.messageExternalId,
-        groupExternalId: payload.groupExternalId,
-        attempt,
-      });
+      for (const payload of payloads) {
+        logger.info("watcher_message_sent", {
+          messageExternalId: payload.messageExternalId,
+          groupExternalId: payload.groupExternalId,
+          attempt,
+          batchSize: payloads.length,
+        });
+      }
       return;
     } catch (error) {
       lastError = error;
@@ -156,8 +200,9 @@ async function sendMessage(payload: SourceMessageEvent) {
           env.WATCHER_RETRY_MAX_DELAY_MS,
         );
         logger.warn("watcher_message_retry_scheduled", {
-          messageExternalId: payload.messageExternalId,
-          groupExternalId: payload.groupExternalId,
+          messageExternalId: payloads[0]?.messageExternalId,
+          groupExternalId: payloads[0]?.groupExternalId,
+          batchSize: payloads.length,
           attempt,
           retryDelayMs,
           error: error instanceof Error ? error.message : String(error),
@@ -169,8 +214,56 @@ async function sendMessage(payload: SourceMessageEvent) {
     }
   }
 
-  await bufferPayload(payload);
   throw lastError;
+}
+
+function createMessageDispatcher() {
+  const queue: SourceMessageEvent[] = [];
+  let flushTimer: NodeJS.Timeout | null = null;
+  let flushChain = Promise.resolve();
+
+  const flush = () => {
+    const run = async () => {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+
+      while (queue.length > 0) {
+        const batch = queue.splice(0, 10);
+
+        try {
+          await deliverMessages(batch);
+        } catch (error) {
+          await Promise.all(batch.map((payload) => bufferPayload(payload)));
+          logger.error("watcher_message_batch_failed", {
+            batchSize: batch.length,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    };
+
+    flushChain = flushChain.then(run, run);
+    return flushChain;
+  };
+
+  const enqueue = async (payload: SourceMessageEvent) => {
+    queue.push(payload);
+
+    if (queue.length >= 10) {
+      void flush();
+      return;
+    }
+
+    if (!flushTimer) {
+      flushTimer = setTimeout(() => {
+        void flush();
+      }, 1_000);
+    }
+  };
+
+  return { enqueue, flush };
 }
 
 function scheduleRecurringTask(
@@ -216,36 +309,93 @@ async function syncGroupsFromAdapter(adapter: SourceAdapter) {
 async function main() {
   const mode = process.argv.includes("--mode=mock") ? "mock" : "adapter";
   const adapter = createSourceAdapter(mode);
+  const messageDispatcher = createMessageDispatcher();
+  let sleepSchedule = { ...DEFAULT_WATCHER_SLEEP_SCHEDULE };
+  let sleeping = false;
+  let sleepTransition = Promise.resolve();
 
   logger.info("watcher_started", { mode });
 
-  await sendHeartbeat();
-
   const config = await fetchConfig();
+  sleepSchedule = toSleepSchedule(config);
+  sleeping = isWithinWatcherSleepSchedule(sleepSchedule);
   const seedableGroups = toSeedableGroups(config);
   const seedableRules = toSeedableRules(config);
   await adapter.seedKnownGroups?.(seedableGroups);
   await adapter.seedRules?.(seedableRules);
+  await adapter.setPaused?.(sleeping);
   logger.info("watcher_config_loaded", config);
   logger.info("watcher_config_seeded", { groups: seedableGroups.length, rules: seedableRules.length });
+  logger.info("watcher_sleep_schedule_loaded", {
+    ...sleepSchedule,
+    sleeping,
+  });
 
-  if (shouldSyncGroupsFromBrowser()) {
+  await sendHeartbeat(sleeping ? "offline" : "online");
+
+  const handleSourceEvent = async (payload: SourceMessageEvent) => {
+    if (sleeping) {
+      return;
+    }
+
+    await messageDispatcher.enqueue(payload);
+  };
+
+  if (!sleeping && shouldSyncGroupsFromBrowser()) {
     await syncGroupsFromAdapter(adapter);
   }
-  await flushBuffer(sendMessage);
-  await adapter.start(sendMessage);
-  if (shouldSyncGroupsFromBrowser()) {
+  if (!sleeping) {
+    await flushBuffer(deliverMessages);
+  }
+  await adapter.start(handleSourceEvent);
+  if (!sleeping && shouldSyncGroupsFromBrowser()) {
     await syncGroupsFromAdapter(adapter);
   }
 
-  scheduleRecurringTask("watcher_heartbeat", env.WATCHER_HEARTBEAT_INTERVAL_MS, sendHeartbeat);
+  const reconcileSleepState = (reason: string) => {
+    const runTransition = async () => {
+      const shouldSleep = isWithinWatcherSleepSchedule(sleepSchedule);
+
+      if (shouldSleep === sleeping) {
+        return;
+      }
+
+      if (shouldSleep) {
+        sleeping = true;
+        await adapter.setPaused?.(true);
+        await messageDispatcher.flush();
+        await sendHeartbeat("offline");
+        logger.info("watcher_sleep_started", { reason, ...sleepSchedule });
+        return;
+      }
+
+      await adapter.setPaused?.(false);
+      sleeping = false;
+      await flushBuffer(deliverMessages);
+      await sendHeartbeat("online");
+      logger.info("watcher_sleep_ended", { reason, ...sleepSchedule });
+    };
+
+    sleepTransition = sleepTransition.then(runTransition, runTransition);
+    return sleepTransition;
+  };
+
+  scheduleRecurringTask("watcher_sleep_reconcile", 15_000, () => reconcileSleepState("clock"));
+
+  scheduleRecurringTask("watcher_heartbeat", env.WATCHER_HEARTBEAT_INTERVAL_MS, async () => {
+    if (!sleeping) {
+      await sendHeartbeat();
+    }
+  });
 
   scheduleRecurringTask("watcher_config_refresh", env.WATCHER_CONFIG_SYNC_INTERVAL_MS, async () => {
     const refreshedConfig = await fetchConfig();
+    sleepSchedule = toSleepSchedule(refreshedConfig);
+    await reconcileSleepState("config_refresh");
     await adapter.seedKnownGroups?.(toSeedableGroups(refreshedConfig));
     await adapter.seedRules?.(toSeedableRules(refreshedConfig));
 
-    if (shouldSyncGroupsFromBrowser()) {
+    if (!sleeping && shouldSyncGroupsFromBrowser()) {
       await syncGroupsFromAdapter(adapter);
     }
   });

@@ -6,6 +6,10 @@ import { AppError } from "@/src/lib/errors";
 import { ageInMilliseconds } from "@/src/lib/time";
 import { sha256 } from "@/src/lib/crypto";
 import { groupsRepository } from "@/src/modules/groups/groups.repository";
+import {
+  isWithinWatcherSleepSchedule,
+  resolveWatcherSleepSchedule,
+} from "@/src/modules/watchers/watcher-schedule";
 
 export async function authenticateWatcherApiKey(apiKey: string) {
   const watcher = await db.watcher.findUnique({
@@ -45,14 +49,20 @@ export async function listWatchers() {
   const watchers = await db.watcher.findMany({
     include: {
       groups: true,
+      runtimeConfig: true,
     },
     orderBy: { name: "asc" },
   });
 
-  return watchers.map((watcher) => ({
-    ...watcher,
-    status: deriveWatcherStatus(watcher.lastHeartbeatAt),
-  }));
+  return watchers.map((watcher) => {
+    const sleepSchedule = resolveWatcherSleepSchedule(watcher.runtimeConfig);
+
+    return {
+      ...watcher,
+      sleepSchedule,
+      status: isWithinWatcherSleepSchedule(sleepSchedule) ? "sleeping" : deriveWatcherStatus(watcher.lastHeartbeatAt),
+    };
+  });
 }
 
 export async function recordHeartbeat(
@@ -117,7 +127,10 @@ export async function syncWatcherGroups(
 }
 
 export async function getWatcherConfig(watcherId: string) {
-  const watcher = await db.watcher.findUnique({ where: { id: watcherId } });
+  const watcher = await db.watcher.findUnique({
+    where: { id: watcherId },
+    include: { runtimeConfig: true },
+  });
 
   if (!watcher) {
     throw new AppError("WATCHER_NOT_FOUND", "Watcher not found", 404);
@@ -156,6 +169,7 @@ export async function getWatcherConfig(watcherId: string) {
       id: watcher.id,
       name: watcher.name,
     },
+    sleepSchedule: resolveWatcherSleepSchedule(watcher.runtimeConfig),
     groups: groups.map((group) => ({
       id: group.id,
       source: group.source,

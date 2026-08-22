@@ -51,7 +51,7 @@ const envSchema = z.object({
   WATCHER_CDP_URL: z.string().url().default("http://127.0.0.1:9222"),
   WATCHER_ZALO_URL: z.string().url().default("https://chat.zalo.me/"),
   WATCHER_PLAYWRIGHT_STATE_FILE: z.string().default("./data/watcher-playwright-state.json"),
-  WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
+  WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(55_000),
   WATCHER_PLAYWRIGHT_VISIBLE_ITEM_LIMIT: z.coerce.number().int().positive().default(15),
   WATCHER_PLAYWRIGHT_MAX_CONVERSATIONS_PER_POLL: z.coerce.number().int().positive().default(6),
   WATCHER_PLAYWRIGHT_FAST_PREVIEW_ONLY: z.enum(["true", "false"]).default("false").transform((value) => value === "true"),

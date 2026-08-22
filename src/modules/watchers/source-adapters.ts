@@ -35,19 +35,33 @@ export type SourceRule = {
 export type SourceAdapter = {
   start(onEvent: (event: SourceMessageEvent) => Promise<void>): Promise<void>;
   stop(): Promise<void>;
+  setPaused?(paused: boolean): Promise<void>;
   listGroups(): Promise<DiscoveredSourceGroup[]>;
   seedKnownGroups?(groups: DiscoveredSourceGroup[]): Promise<void>;
   seedRules?(rules: SourceRule[]): Promise<void>;
 };
 
 export class MockAdapter implements SourceAdapter {
+  private paused = false;
+
   async start(onEvent: (event: SourceMessageEvent) => Promise<void>) {
+    if (this.paused) {
+      return;
+    }
+
     for (const event of sampleMessages as SourceMessageEvent[]) {
+      if (this.paused) {
+        break;
+      }
       await onEvent(event);
     }
   }
 
   async stop() {}
+
+  async setPaused(paused: boolean) {
+    this.paused = paused;
+  }
 
   async listGroups() {
     const groups = new Map<string, DiscoveredSourceGroup>();
@@ -136,6 +150,9 @@ const WATCHER_CONTENT_DEDUPE_WINDOW_MS = 120_000;
 const WATCHER_REALTIME_MAX_MESSAGE_AGE_MS = 10 * 60_000;
 const CONVERSATION_CATEGORY_SCAN_ORDER: ConversationCategoryKey[] = ['other', 'priority'];
 const WATCHER_MAX_LIVE_SNAPSHOT_LIMIT = 80;
+const WATCHER_DOM_OBSERVER_KEY = '__zalo_watcher_conversation_observer';
+const WATCHER_DOM_OBSERVER_CALLBACK = '__zaloWatcherConversationChanged';
+const WATCHER_DOM_OBSERVER_DEBOUNCE_MS = 350;
 const CONVERSATION_ROW_SELECTOR =
   '#conversationList .msg-item[data-id="div_TabMsg_ThrdChItem"], ' +
   '#conversationList .msg-item[anim-data-id], ' +
@@ -858,15 +875,29 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
   private recentContentSignatures = new Map<string, number>();
   private loadedPersistedState = false;
   private consecutiveEmptySnapshotPolls = 0;
+  private paused = false;
+  private onEvent: ((event: SourceMessageEvent) => Promise<void>) | null = null;
+  private observerBoundPages = new WeakSet<Page>();
+  private observerLoggedPages = new WeakSet<Page>();
 
   async start(onEvent: (event: SourceMessageEvent) => Promise<void>) {
     this.stopped = false;
-    await this.loadPersistedState();
+    this.onEvent = onEvent;
+    if (!this.loadedPersistedState) {
+      await this.loadPersistedState();
+    }
+
+    if (this.paused) {
+      logger.info('watcher_playwright_started_paused');
+      return;
+    }
+
     await this.runPollCycle(onEvent, true);
   }
 
   async stop() {
     this.stopped = true;
+    this.onEvent = null;
     if (this.pollTimer) {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
@@ -874,6 +905,39 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
 
     await this.resetBrowserState('adapter_stop');
     await this.persistState();
+  }
+
+  async setPaused(paused: boolean) {
+    if (this.paused === paused) {
+      return;
+    }
+
+    this.paused = paused;
+
+    if (this.pollTimer) {
+      clearTimeout(this.pollTimer);
+      this.pollTimer = null;
+    }
+
+    if (paused) {
+      await this.runSerialized(async () => {
+        if (!this.loadedPersistedState) {
+          await this.loadPersistedState();
+        }
+        if (this.page && !this.page.isClosed()) {
+          await this.removeMutationObserver(this.page);
+        }
+        await this.persistState();
+      });
+      logger.info('watcher_playwright_paused');
+      return;
+    }
+
+    if (!this.stopped && this.onEvent) {
+      await this.runPollCycle(this.onEvent, false, true);
+    }
+
+    logger.info('watcher_playwright_resumed');
   }
 
   async seedKnownGroups(groups: DiscoveredSourceGroup[]) {
@@ -1144,8 +1208,99 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     return run;
   }
 
-  private scheduleNextPoll(onEvent: (event: SourceMessageEvent) => Promise<void>) {
-    if (this.stopped) {
+  private async installMutationObserver(page: Page) {
+    if (!this.observerBoundPages.has(page)) {
+      await page.exposeFunction(WATCHER_DOM_OBSERVER_CALLBACK, () => {
+        if (this.stopped || this.paused || this.page !== page || !this.onEvent) {
+          return;
+        }
+
+        this.scheduleNextPoll(this.onEvent, WATCHER_DOM_OBSERVER_DEBOUNCE_MS);
+      });
+      this.observerBoundPages.add(page);
+    }
+
+    const installed = await page.evaluate(
+      ({ callbackName, observerKey }) => {
+        type ObserverState = { observer: MutationObserver; timer: number | null };
+        const observerWindow = window as unknown as Record<string, ObserverState | (() => Promise<void>) | undefined>;
+        const existing = observerWindow[observerKey];
+
+        if (existing && typeof existing !== 'function') {
+          existing.observer.disconnect();
+          if (existing.timer !== null) {
+            window.clearTimeout(existing.timer);
+          }
+        }
+
+        const target = document.querySelector('#conversationList, .conv-list, #searchResultList');
+        if (!target) {
+          delete observerWindow[observerKey];
+          return false;
+        }
+
+        const state: ObserverState = {
+          observer: new MutationObserver(() => {
+            if (state.timer !== null) {
+              window.clearTimeout(state.timer);
+            }
+
+            state.timer = window.setTimeout(() => {
+              state.timer = null;
+              const callback = observerWindow[callbackName];
+              if (typeof callback === 'function') {
+                void callback();
+              }
+            }, 250);
+          }),
+          timer: null,
+        };
+
+        state.observer.observe(target, {
+          subtree: true,
+          childList: true,
+          characterData: true,
+          attributes: true,
+          attributeFilter: ['class', 'data-id', 'anim-data-id'],
+        });
+        observerWindow[observerKey] = state;
+        return true;
+      },
+      { callbackName: WATCHER_DOM_OBSERVER_CALLBACK, observerKey: WATCHER_DOM_OBSERVER_KEY },
+    );
+
+    if (installed && !this.observerLoggedPages.has(page)) {
+      this.observerLoggedPages.add(page);
+      logger.info('watcher_playwright_mutation_observer_attached', {
+        debounceMs: WATCHER_DOM_OBSERVER_DEBOUNCE_MS,
+        safetyPollIntervalMs: env.WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS,
+      });
+    }
+  }
+
+  private async removeMutationObserver(page: Page) {
+    await page
+      .evaluate((observerKey) => {
+        type ObserverState = { observer: MutationObserver; timer: number | null };
+        const observerWindow = window as unknown as Record<string, ObserverState | undefined>;
+        const state = observerWindow[observerKey];
+
+        if (state) {
+          state.observer.disconnect();
+          if (state.timer !== null) {
+            window.clearTimeout(state.timer);
+          }
+          delete observerWindow[observerKey];
+        }
+      }, WATCHER_DOM_OBSERVER_KEY)
+      .catch(() => {});
+  }
+
+  private scheduleNextPoll(
+    onEvent: (event: SourceMessageEvent) => Promise<void>,
+    delayMs = env.WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS,
+  ) {
+    if (this.stopped || this.paused) {
       return;
     }
 
@@ -1155,17 +1310,35 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
 
     this.pollTimer = setTimeout(() => {
       void this.runPollCycle(onEvent, false);
-    }, env.WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS);
+    }, delayMs);
   }
 
-  private async runPollCycle(onEvent: (event: SourceMessageEvent) => Promise<void>, isInitial: boolean) {
+  private async runPollCycle(
+    onEvent: (event: SourceMessageEvent) => Promise<void>,
+    isInitial: boolean,
+    suppressEvents = false,
+  ) {
+    if (this.stopped || this.paused) {
+      return;
+    }
+
     try {
-      await this.runSerialized(() => this.withRecoveredBrowser('poll', () => this.poll(onEvent, isInitial)));
+      await this.runSerialized(() =>
+        this.withRecoveredBrowser('poll', () => this.poll(onEvent, isInitial, suppressEvents)),
+      );
     } catch (error) {
       logger.warn('watcher_playwright_poll_failed', {
         error: error instanceof Error ? error.message : String(error),
       });
     } finally {
+      if (!this.stopped && !this.paused && this.page && !this.page.isClosed()) {
+        await this.runSerialized(() => this.installMutationObserver(this.page as Page)).catch((error) => {
+          logger.warn('watcher_playwright_mutation_observer_failed', {
+            error: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
+
       this.scheduleNextPoll(onEvent);
     }
   }
@@ -2349,8 +2522,13 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     return Math.min(env.WATCHER_PLAYWRIGHT_MAX_CONVERSATIONS_PER_POLL, this.getLiveSnapshotLimit());
   }
 
-  private async poll(onEvent: (event: SourceMessageEvent) => Promise<void>, isInitial: boolean) {
+  private async poll(
+    onEvent: (event: SourceMessageEvent) => Promise<void>,
+    isInitial: boolean,
+    suppressEvents = false,
+  ) {
     const page = await this.ensurePage();
+    await this.removeMutationObserver(page);
     if (!env.WATCHER_PLAYWRIGHT_FAST_PREVIEW_ONLY && !env.WATCHER_PLAYWRIGHT_RULE_PREFILTER_ENABLED) {
       await this.clearConversationSearch(page);
       await this.ensureRecentMessagesSynced(page);
@@ -2420,6 +2598,12 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       const previousSignature = this.knownSignatures.get(snapshot.animDataId);
 
       if (previousSignature === signature) {
+        continue;
+      }
+
+      if (suppressEvents) {
+        this.knownSignatures.set(snapshot.animDataId, signature);
+        stateChanged = true;
         continue;
       }
 

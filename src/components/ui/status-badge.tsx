@@ -17,6 +17,10 @@ function resolveColors(value: string) {
     return { background: "rgba(161, 98, 7, 0.14)", color: "var(--color-warning)" };
   }
 
+  if (normalized === "sleeping") {
+    return { background: "rgba(73, 56, 140, 0.14)", color: "var(--color-accent)" };
+  }
+
   return { background: "rgba(95, 78, 58, 0.12)", color: "var(--color-muted)" };
 }
 
@@ -41,6 +45,7 @@ function resolveLabel(value: string) {
     degraded: "suy giảm",
     retry_scheduled: "sẽ thử lại",
     processing: "đang xử lý",
+    sleeping: "đang nghỉ",
     rejected_no_include: "không trúng include",
     rejected_by_exclude: "bị exclude",
     rejected_group_disabled: "nhóm đang tắt",
