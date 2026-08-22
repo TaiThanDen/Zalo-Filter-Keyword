@@ -1,0 +1,10 @@
+CREATE INDEX IF NOT EXISTS "Group_updatedAt_idx" ON "Group"("updatedAt");
+CREATE INDEX IF NOT EXISTS "Group_watcherId_isEnabled_name_idx" ON "Group"("watcherId", "isEnabled", "name");
+CREATE INDEX IF NOT EXISTS "GroupRule_ruleId_idx" ON "GroupRule"("ruleId");
+CREATE INDEX IF NOT EXISTS "MatchLog_processedAt_idx" ON "MatchLog"("processedAt");
+CREATE INDEX IF NOT EXISTS "NotificationChannel_isActive_type_idx" ON "NotificationChannel"("isActive", "type");
+CREATE INDEX IF NOT EXISTS "NotificationDelivery_status_createdAt_idx" ON "NotificationDelivery"("status", "createdAt");
+CREATE INDEX IF NOT EXISTS "NotificationDelivery_status_nextRetryAt_createdAt_idx" ON "NotificationDelivery"("status", "nextRetryAt", "createdAt");
+CREATE INDEX IF NOT EXISTS "NotificationOutbox_createdAt_idx" ON "NotificationOutbox"("createdAt");
+CREATE INDEX IF NOT EXISTS "NotificationOutbox_status_createdAt_idx" ON "NotificationOutbox"("status", "createdAt");
+CREATE INDEX IF NOT EXISTS "NotificationOutbox_status_nextRetryAt_createdAt_idx" ON "NotificationOutbox"("status", "nextRetryAt", "createdAt");

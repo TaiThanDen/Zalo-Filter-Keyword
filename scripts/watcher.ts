@@ -15,6 +15,8 @@ import {
   type SourceRule,
 } from "@/src/modules/watchers/source-adapters";
 
+const WATCHER_MESSAGE_BATCH_SIZE = 3;
+
 async function fetchConfig() {
   const response = await fetch(`${env.WATCHER_API_BASE_URL}/api/watcher/config`, {
     headers: {
@@ -146,8 +148,8 @@ async function flushBuffer(sendMessages: (payloads: SourceMessageEvent[]) => Pro
 
     const payloads = lines.map((line) => JSON.parse(line) as SourceMessageEvent);
 
-    for (let index = 0; index < payloads.length; index += 10) {
-      await sendMessages(payloads.slice(index, index + 10));
+    for (let index = 0; index < payloads.length; index += WATCHER_MESSAGE_BATCH_SIZE) {
+      await sendMessages(payloads.slice(index, index + WATCHER_MESSAGE_BATCH_SIZE));
     }
 
     await unlink(env.WATCHER_BUFFER_FILE_PATH);
@@ -230,7 +232,7 @@ function createMessageDispatcher() {
       }
 
       while (queue.length > 0) {
-        const batch = queue.splice(0, 10);
+        const batch = queue.splice(0, WATCHER_MESSAGE_BATCH_SIZE);
 
         try {
           await deliverMessages(batch);
@@ -251,7 +253,7 @@ function createMessageDispatcher() {
   const enqueue = async (payload: SourceMessageEvent) => {
     queue.push(payload);
 
-    if (queue.length >= 10) {
+    if (queue.length >= WATCHER_MESSAGE_BATCH_SIZE) {
       void flush();
       return;
     }
