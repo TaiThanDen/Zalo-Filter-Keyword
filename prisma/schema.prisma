@@ -90,9 +90,11 @@ model Watcher {
 
 model WatcherRuntimeConfig {
   watcherId        String   @id
+  controlMode      String   @default("scheduled")
   sleepEnabled     Boolean  @default(false)
   sleepStartMinute Int      @default(60)
   sleepEndMinute   Int      @default(360)
+  sleepWindows     Json     @default("[]")
   sleepTimezone    String   @default("Asia/Ho_Chi_Minh")
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt

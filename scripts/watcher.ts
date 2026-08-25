@@ -4,8 +4,9 @@ import { IMPLEMENTATION_DEFAULTS } from "@/src/config/constants";
 import { logger } from "@/src/lib/logger";
 import {
   DEFAULT_WATCHER_SLEEP_SCHEDULE,
-  isWithinWatcherSleepSchedule,
-  type WatcherSleepSchedule,
+  resolveWatcherRuntimeState,
+  type WatcherRuntimeControl,
+  type WatcherSleepWindow,
 } from "@/src/modules/watchers/watcher-schedule";
 import {
   createSourceAdapter,
@@ -81,15 +82,25 @@ async function sendHeartbeat(status: "online" | "offline" = "online") {
   }
 }
 
-function toSleepSchedule(config: unknown): WatcherSleepSchedule {
+async function fetchRuntimeControl() {
+  const response = await fetch(`${env.WATCHER_API_BASE_URL}/api/watcher/runtime`, {
+    headers: { Authorization: `Bearer ${env.WATCHER_API_KEY}` },
+    signal: AbortSignal.timeout(env.WATCHER_CONTROL_REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`Watcher runtime fetch failed with status ${response.status}`);
+  return response.json();
+}
+
+function toRuntimeControl(config: unknown): WatcherRuntimeControl {
   if (!config || typeof config !== "object") {
-    return { ...DEFAULT_WATCHER_SLEEP_SCHEDULE };
+    return { controlMode: "scheduled", sleepSchedule: { ...DEFAULT_WATCHER_SLEEP_SCHEDULE } };
   }
 
-  const schedule = (config as { sleepSchedule?: unknown }).sleepSchedule;
+  const input = config as { controlMode?: unknown; sleepSchedule?: unknown };
+  const schedule = input.sleepSchedule;
 
   if (!schedule || typeof schedule !== "object") {
-    return { ...DEFAULT_WATCHER_SLEEP_SCHEDULE };
+    return { controlMode: "scheduled", sleepSchedule: { ...DEFAULT_WATCHER_SLEEP_SCHEDULE } };
   }
 
   const candidate = schedule as Record<string, unknown>;
@@ -100,14 +111,33 @@ function toSleepSchedule(config: unknown): WatcherSleepSchedule {
     !Number.isInteger(candidate.endMinute) ||
     typeof candidate.timezone !== "string"
   ) {
-    return { ...DEFAULT_WATCHER_SLEEP_SCHEDULE };
+    return { controlMode: "scheduled", sleepSchedule: { ...DEFAULT_WATCHER_SLEEP_SCHEDULE } };
   }
 
+  const validWindows = Array.isArray(candidate.windows)
+    ? candidate.windows.filter((value): value is WatcherSleepWindow => {
+      if (!value || typeof value !== "object") return false;
+      const window = value as Record<string, unknown>;
+      return Number.isInteger(window.startMinute) && Number.isInteger(window.endMinute)
+        && Number(window.startMinute) >= 0 && Number(window.startMinute) < 1440
+        && Number(window.endMinute) >= 0 && Number(window.endMinute) < 1440
+        && window.startMinute !== window.endMinute;
+    })
+    : [];
+  const controlMode = input.controlMode === "paused" || input.controlMode === "running" ? input.controlMode : "scheduled";
+
   return {
-    enabled: candidate.enabled,
-    startMinute: candidate.startMinute as number,
-    endMinute: candidate.endMinute as number,
-    timezone: candidate.timezone,
+    controlMode,
+    sleepSchedule: {
+      enabled: candidate.enabled,
+      windows: validWindows.length > 0 ? validWindows : [{
+        startMinute: candidate.startMinute as number,
+        endMinute: candidate.endMinute as number,
+      }],
+      startMinute: candidate.startMinute as number,
+      endMinute: candidate.endMinute as number,
+      timezone: candidate.timezone,
+    },
   };
 }
 
@@ -312,15 +342,18 @@ async function main() {
   const mode = process.argv.includes("--mode=mock") ? "mock" : "adapter";
   const adapter = createSourceAdapter(mode);
   const messageDispatcher = createMessageDispatcher();
-  let sleepSchedule = { ...DEFAULT_WATCHER_SLEEP_SCHEDULE };
+  let runtimeControl: WatcherRuntimeControl = {
+    controlMode: "scheduled",
+    sleepSchedule: { ...DEFAULT_WATCHER_SLEEP_SCHEDULE },
+  };
   let sleeping = false;
   let sleepTransition = Promise.resolve();
 
   logger.info("watcher_started", { mode });
 
   const config = await fetchConfig();
-  sleepSchedule = toSleepSchedule(config);
-  sleeping = isWithinWatcherSleepSchedule(sleepSchedule);
+  runtimeControl = toRuntimeControl(config);
+  sleeping = resolveWatcherRuntimeState(runtimeControl).paused;
   const seedableGroups = toSeedableGroups(config);
   const seedableRules = toSeedableRules(config);
   await adapter.seedKnownGroups?.(seedableGroups);
@@ -329,7 +362,7 @@ async function main() {
   logger.info("watcher_config_loaded", config);
   logger.info("watcher_config_seeded", { groups: seedableGroups.length, rules: seedableRules.length });
   logger.info("watcher_sleep_schedule_loaded", {
-    ...sleepSchedule,
+    ...runtimeControl,
     sleeping,
   });
 
@@ -356,7 +389,8 @@ async function main() {
 
   const reconcileSleepState = (reason: string) => {
     const runTransition = async () => {
-      const shouldSleep = isWithinWatcherSleepSchedule(sleepSchedule);
+      const runtimeState = resolveWatcherRuntimeState(runtimeControl);
+      const shouldSleep = runtimeState.paused;
 
       if (shouldSleep === sleeping) {
         return;
@@ -367,7 +401,7 @@ async function main() {
         await adapter.setPaused?.(true);
         await messageDispatcher.flush();
         await sendHeartbeat("offline");
-        logger.info("watcher_sleep_started", { reason, ...sleepSchedule });
+        logger.info("watcher_sleep_started", { reason, pauseReason: runtimeState.reason, ...runtimeControl });
         return;
       }
 
@@ -375,7 +409,7 @@ async function main() {
       sleeping = false;
       await flushBuffer(deliverMessages);
       await sendHeartbeat("online");
-      logger.info("watcher_sleep_ended", { reason, ...sleepSchedule });
+      logger.info("watcher_sleep_ended", { reason, resumeReason: runtimeState.reason, ...runtimeControl });
     };
 
     sleepTransition = sleepTransition.then(runTransition, runTransition);
@@ -383,6 +417,11 @@ async function main() {
   };
 
   scheduleRecurringTask("watcher_sleep_reconcile", 15_000, () => reconcileSleepState("clock"));
+
+  scheduleRecurringTask("watcher_runtime_refresh", env.WATCHER_RUNTIME_SYNC_INTERVAL_MS, async () => {
+    runtimeControl = toRuntimeControl(await fetchRuntimeControl());
+    await reconcileSleepState("runtime_refresh");
+  });
 
   scheduleRecurringTask("watcher_heartbeat", env.WATCHER_HEARTBEAT_INTERVAL_MS, async () => {
     if (!sleeping) {
@@ -392,7 +431,7 @@ async function main() {
 
   scheduleRecurringTask("watcher_config_refresh", env.WATCHER_CONFIG_SYNC_INTERVAL_MS, async () => {
     const refreshedConfig = await fetchConfig();
-    sleepSchedule = toSleepSchedule(refreshedConfig);
+    runtimeControl = toRuntimeControl(refreshedConfig);
     await reconcileSleepState("config_refresh");
     await adapter.seedKnownGroups?.(toSeedableGroups(refreshedConfig));
     await adapter.seedRules?.(toSeedableRules(refreshedConfig));

@@ -42,6 +42,7 @@ const envSchema = z.object({
   WATCHER_VERSION: z.string().min(1).default("0.1.0"),
   WATCHER_HEARTBEAT_INTERVAL_MS: z.coerce.number().int().positive().default(300_000),
   WATCHER_CONFIG_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(600_000),
+  WATCHER_RUNTIME_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(30_000),
   WATCHER_CONTROL_REQUEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   WATCHER_INGEST_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
   WATCHER_RETRY_BASE_DELAY_MS: z.coerce.number().int().positive().default(1_000),

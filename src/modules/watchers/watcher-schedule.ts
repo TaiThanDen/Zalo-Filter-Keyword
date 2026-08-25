@@ -1,14 +1,30 @@
 export const WATCHER_SLEEP_TIMEZONE = "Asia/Ho_Chi_Minh";
+export const MAX_WATCHER_SLEEP_WINDOWS = 8;
+
+export type WatcherControlMode = "scheduled" | "paused" | "running";
+
+export type WatcherSleepWindow = {
+  startMinute: number;
+  endMinute: number;
+};
 
 export type WatcherSleepSchedule = {
   enabled: boolean;
+  windows: WatcherSleepWindow[];
+  // Kept for compatibility with watchers deployed before multi-window support.
   startMinute: number;
   endMinute: number;
   timezone: string;
 };
 
+export type WatcherRuntimeControl = {
+  controlMode: WatcherControlMode;
+  sleepSchedule: WatcherSleepSchedule;
+};
+
 export const DEFAULT_WATCHER_SLEEP_SCHEDULE: WatcherSleepSchedule = {
   enabled: false,
+  windows: [{ startMinute: 60, endMinute: 360 }],
   startMinute: 60,
   endMinute: 360,
   timezone: WATCHER_SLEEP_TIMEZONE,
@@ -48,17 +64,42 @@ export function getMinuteOfDay(date: Date, timezone: string) {
 }
 
 export function isWithinWatcherSleepSchedule(schedule: WatcherSleepSchedule, date = new Date()) {
-  if (!schedule.enabled || schedule.startMinute === schedule.endMinute) {
+  if (!schedule.enabled) {
     return false;
   }
 
   const minuteOfDay = getMinuteOfDay(date, schedule.timezone);
 
-  if (schedule.startMinute < schedule.endMinute) {
-    return minuteOfDay >= schedule.startMinute && minuteOfDay < schedule.endMinute;
+  return schedule.windows.some((window) => isMinuteWithinWindow(minuteOfDay, window));
+}
+
+function isMinuteWithinWindow(minuteOfDay: number, window: WatcherSleepWindow) {
+  if (window.startMinute === window.endMinute) {
+    return false;
   }
 
-  return minuteOfDay >= schedule.startMinute || minuteOfDay < schedule.endMinute;
+  if (window.startMinute < window.endMinute) {
+    return minuteOfDay >= window.startMinute && minuteOfDay < window.endMinute;
+  }
+
+  return minuteOfDay >= window.startMinute || minuteOfDay < window.endMinute;
+}
+
+function isSleepWindow(value: unknown): value is WatcherSleepWindow {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Record<string, unknown>;
+  return Number.isInteger(candidate.startMinute) && Number.isInteger(candidate.endMinute)
+    && Number(candidate.startMinute) >= 0 && Number(candidate.startMinute) < 1440
+    && Number(candidate.endMinute) >= 0 && Number(candidate.endMinute) < 1440
+    && candidate.startMinute !== candidate.endMinute;
+}
+
+function resolveSleepWindows(value: unknown, fallback: WatcherSleepWindow) {
+  if (Array.isArray(value)) {
+    const windows = value.filter(isSleepWindow).slice(0, MAX_WATCHER_SLEEP_WINDOWS);
+    if (windows.length > 0) return windows;
+  }
+  return [fallback];
 }
 
 export function resolveWatcherSleepSchedule(
@@ -66,6 +107,7 @@ export function resolveWatcherSleepSchedule(
     sleepEnabled: boolean;
     sleepStartMinute: number;
     sleepEndMinute: number;
+    sleepWindows?: unknown;
     sleepTimezone: string;
   } | null,
 ): WatcherSleepSchedule {
@@ -73,10 +115,35 @@ export function resolveWatcherSleepSchedule(
     return { ...DEFAULT_WATCHER_SLEEP_SCHEDULE };
   }
 
+  const fallback = { startMinute: config.sleepStartMinute, endMinute: config.sleepEndMinute };
+  const windows = resolveSleepWindows(config.sleepWindows, fallback);
   return {
     enabled: config.sleepEnabled,
-    startMinute: config.sleepStartMinute,
-    endMinute: config.sleepEndMinute,
+    windows,
+    startMinute: windows[0].startMinute,
+    endMinute: windows[0].endMinute,
     timezone: config.sleepTimezone,
+  };
+}
+
+export function resolveWatcherRuntimeControl(config?: {
+  controlMode?: string;
+  sleepEnabled: boolean;
+  sleepStartMinute: number;
+  sleepEndMinute: number;
+  sleepWindows?: unknown;
+  sleepTimezone: string;
+} | null): WatcherRuntimeControl {
+  const controlMode: WatcherControlMode =
+    config?.controlMode === "paused" || config?.controlMode === "running" ? config.controlMode : "scheduled";
+  return { controlMode, sleepSchedule: resolveWatcherSleepSchedule(config) };
+}
+
+export function resolveWatcherRuntimeState(control: WatcherRuntimeControl, date = new Date()) {
+  if (control.controlMode === "paused") return { paused: true, reason: "manual" as const };
+  if (control.controlMode === "running") return { paused: false, reason: "manual" as const };
+  return {
+    paused: isWithinWatcherSleepSchedule(control.sleepSchedule, date),
+    reason: "schedule" as const,
   };
 }

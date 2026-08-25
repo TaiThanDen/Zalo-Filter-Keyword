@@ -5,6 +5,7 @@ import {
   getMinuteOfDay,
   isWithinWatcherSleepSchedule,
   parseClockTime,
+  resolveWatcherRuntimeState,
   WATCHER_SLEEP_TIMEZONE,
   type WatcherSleepSchedule,
 } from "@/src/modules/watchers/watcher-schedule";
@@ -12,6 +13,7 @@ import { createSourceAdapter } from "@/src/modules/watchers/source-adapters";
 
 const dailySchedule: WatcherSleepSchedule = {
   enabled: true,
+  windows: [{ startMinute: parseClockTime("01:00"), endMinute: parseClockTime("06:00") }],
   startMinute: parseClockTime("01:00"),
   endMinute: parseClockTime("06:00"),
   timezone: WATCHER_SLEEP_TIMEZONE,
@@ -34,6 +36,7 @@ test("Vietnam schedule includes 01:00 and excludes 06:00", () => {
 test("overnight schedule wraps across midnight", () => {
   const overnight: WatcherSleepSchedule = {
     enabled: true,
+    windows: [{ startMinute: parseClockTime("23:00"), endMinute: parseClockTime("06:00") }],
     startMinute: parseClockTime("23:00"),
     endMinute: parseClockTime("06:00"),
     timezone: WATCHER_SLEEP_TIMEZONE,
@@ -42,6 +45,33 @@ test("overnight schedule wraps across midnight", () => {
   assert.equal(isWithinWatcherSleepSchedule(overnight, new Date("2026-08-22T16:30:00.000Z")), true);
   assert.equal(isWithinWatcherSleepSchedule(overnight, new Date("2026-08-22T20:00:00.000Z")), true);
   assert.equal(isWithinWatcherSleepSchedule(overnight, new Date("2026-08-22T23:00:00.000Z")), false);
+});
+
+test("multiple sleep windows pause during any configured window", () => {
+  const schedule: WatcherSleepSchedule = {
+    enabled: true,
+    windows: [
+      { startMinute: parseClockTime("01:00"), endMinute: parseClockTime("06:00") },
+      { startMinute: parseClockTime("12:00"), endMinute: parseClockTime("13:00") },
+    ],
+    startMinute: parseClockTime("01:00"),
+    endMinute: parseClockTime("06:00"),
+    timezone: WATCHER_SLEEP_TIMEZONE,
+  };
+
+  assert.equal(isWithinWatcherSleepSchedule(schedule, new Date("2026-08-23T05:30:00.000Z")), true);
+  assert.equal(isWithinWatcherSleepSchedule(schedule, new Date("2026-08-23T06:30:00.000Z")), false);
+});
+
+test("manual control overrides the schedule", () => {
+  assert.deepEqual(resolveWatcherRuntimeState({ controlMode: "paused", sleepSchedule: { ...dailySchedule, enabled: false } }), {
+    paused: true,
+    reason: "manual",
+  });
+  assert.deepEqual(resolveWatcherRuntimeState({ controlMode: "running", sleepSchedule: dailySchedule }, new Date("2026-08-22T18:30:00.000Z")), {
+    paused: false,
+    reason: "manual",
+  });
 });
 
 test("paused adapter does not emit source events", async () => {

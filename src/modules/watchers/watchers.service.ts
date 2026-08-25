@@ -7,8 +7,8 @@ import { ageInMilliseconds } from "@/src/lib/time";
 import { sha256 } from "@/src/lib/crypto";
 import { groupsRepository } from "@/src/modules/groups/groups.repository";
 import {
-  isWithinWatcherSleepSchedule,
-  resolveWatcherSleepSchedule,
+  resolveWatcherRuntimeControl,
+  resolveWatcherRuntimeState,
 } from "@/src/modules/watchers/watcher-schedule";
 
 export async function authenticateWatcherApiKey(apiKey: string) {
@@ -55,12 +55,15 @@ export async function listWatchers() {
   });
 
   return watchers.map((watcher) => {
-    const sleepSchedule = resolveWatcherSleepSchedule(watcher.runtimeConfig);
+    const runtimeControl = resolveWatcherRuntimeControl(watcher.runtimeConfig);
+    const runtimeState = resolveWatcherRuntimeState(runtimeControl);
 
     return {
       ...watcher,
-      sleepSchedule,
-      status: isWithinWatcherSleepSchedule(sleepSchedule) ? "sleeping" : deriveWatcherStatus(watcher.lastHeartbeatAt),
+      ...runtimeControl,
+      status: runtimeState.paused
+        ? runtimeState.reason === "manual" ? "paused" : "sleeping"
+        : deriveWatcherStatus(watcher.lastHeartbeatAt),
     };
   });
 }
@@ -169,7 +172,7 @@ export async function getWatcherConfig(watcherId: string) {
       id: watcher.id,
       name: watcher.name,
     },
-    sleepSchedule: resolveWatcherSleepSchedule(watcher.runtimeConfig),
+    ...resolveWatcherRuntimeControl(watcher.runtimeConfig),
     groups: groups.map((group) => ({
       id: group.id,
       source: group.source,
@@ -190,4 +193,28 @@ export async function getWatcherConfig(watcherId: string) {
       isActive: channel.isActive,
     })),
   };
+}
+
+export async function getAuthenticatedWatcherRuntime(apiKey: string) {
+  const watcher = await db.watcher.findUnique({
+    where: { apiKeyHash: sha256(apiKey) },
+    select: {
+      runtimeConfig: {
+        select: {
+          controlMode: true,
+          sleepEnabled: true,
+          sleepStartMinute: true,
+          sleepEndMinute: true,
+          sleepWindows: true,
+          sleepTimezone: true,
+        },
+      },
+    },
+  });
+
+  if (!watcher) {
+    throw new AppError("UNAUTHORIZED", "Invalid watcher credentials", 401);
+  }
+
+  return resolveWatcherRuntimeControl(watcher.runtimeConfig);
 }

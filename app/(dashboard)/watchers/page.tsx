@@ -1,6 +1,6 @@
 ﻿import { StatusBadge } from "@/src/components/ui/status-badge";
 import { listWatchers } from "@/src/modules/watchers/watchers.service";
-import { JsonActionForm } from "@/src/components/forms/json-action-form";
+import { WatcherRuntimeControlForm } from "@/src/components/forms/watcher-runtime-control-form";
 import { formatClockTime, WATCHER_SLEEP_TIMEZONE } from "@/src/modules/watchers/watcher-schedule";
 
 export default async function WatchersPage() {
@@ -50,32 +50,15 @@ export default async function WatchersPage() {
                     <td data-label="Phiên bản">{watcher.lastVersion ?? "-"}</td>
                     <td data-label="Số nhóm">{watcher.groups.length}</td>
                     <td data-label="Lịch nghỉ">
-                      <JsonActionForm
-                        endpoint={`/api/watchers/${watcher.id}/schedule`}
-                        method="PATCH"
-                        successMessage="Đã cập nhật lịch nghỉ watcher"
-                        errorMessage="Không thể cập nhật lịch nghỉ"
-                        className="grid min-w-56 gap-2"
-                        booleanFields={["sleepEnabled"]}
-                      >
-                        <label className="inline-flex items-center gap-2 text-sm font-medium text-[var(--color-muted)]">
-                          <input type="checkbox" name="sleepEnabled" defaultChecked={watcher.sleepSchedule.enabled} />
-                          Bật lịch nghỉ
-                        </label>
-                        <div className="grid grid-cols-2 gap-2">
-                          <label className="grid gap-1 text-xs text-[var(--color-muted)]">
-                            Bắt đầu
-                            <input className="field" type="time" name="sleepStart" defaultValue={formatClockTime(watcher.sleepSchedule.startMinute)} required />
-                          </label>
-                          <label className="grid gap-1 text-xs text-[var(--color-muted)]">
-                            Kết thúc
-                            <input className="field" type="time" name="sleepEnd" defaultValue={formatClockTime(watcher.sleepSchedule.endMinute)} required />
-                          </label>
-                        </div>
-                        <input type="hidden" name="sleepTimezone" value={WATCHER_SLEEP_TIMEZONE} />
-                        <p className="text-xs leading-5 text-[var(--color-muted)]">Múi giờ: Hồ Chí Minh (UTC+7)</p>
-                        <button type="submit" className="btn btn-secondary">Lưu lịch nghỉ</button>
-                      </JsonActionForm>
+                      <WatcherRuntimeControlForm
+                        watcherId={watcher.id}
+                        initialControlMode={watcher.controlMode}
+                        initialEnabled={watcher.sleepSchedule.enabled}
+                        initialWindows={watcher.sleepSchedule.windows.map((window) => ({
+                          sleepStart: formatClockTime(window.startMinute),
+                          sleepEnd: formatClockTime(window.endMinute),
+                        }))}
+                      />
                     </td>
                   </tr>
                 ))
