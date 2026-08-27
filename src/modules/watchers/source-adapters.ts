@@ -2,6 +2,7 @@
 import { env } from '@/src/config/env';
 import { sha256 } from '@/src/lib/crypto';
 import { logger } from '@/src/lib/logger';
+import { WatcherPollCoordinator, type WatcherPollRequestReason } from '@/src/modules/watchers/poll-coordinator';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright-core';
@@ -867,6 +868,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
   private context: BrowserContext | null = null;
   private page: Page | null = null;
   private pollTimer: NodeJS.Timeout | null = null;
+  private pollCoordinator: WatcherPollCoordinator | null = null;
   private browserTaskQueue: Promise<void> = Promise.resolve();
   private stopped = false;
   private knownSignatures = new Map<string, string>();
@@ -879,6 +881,25 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
   private onEvent: ((event: SourceMessageEvent) => Promise<void>) | null = null;
   private observerBoundPages = new WeakSet<Page>();
   private observerLoggedPages = new WeakSet<Page>();
+  private storedGroupCandidatesCache: {
+    page: Page;
+    expiresAtMs: number;
+    candidates: StoredGroupCandidate[];
+  } | null = null;
+  private instrumentationWindowStartedAtMs = Date.now();
+  private lastInstrumentationLogAtMs = Date.now();
+  private instrumentation = {
+    mutationSignals: 0,
+    pollRuns: 0,
+    pollFailures: 0,
+    pollDurationTotalMs: 0,
+    pollDurationMaxMs: 0,
+    localStorageCacheHits: 0,
+    localStorageCacheMisses: 0,
+    localStorageScans: 0,
+    localStorageTimestampReads: 0,
+    localStorageTimestampKeys: 0,
+  };
 
   async start(onEvent: (event: SourceMessageEvent) => Promise<void>) {
     this.stopped = false;
@@ -902,6 +923,9 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
     }
+    this.pollCoordinator?.cancel();
+    this.pollCoordinator = null;
+    this.storedGroupCandidatesCache = null;
 
     await this.resetBrowserState('adapter_stop');
     await this.persistState();
@@ -918,6 +942,8 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       clearTimeout(this.pollTimer);
       this.pollTimer = null;
     }
+    this.pollCoordinator?.cancel();
+    this.pollCoordinator = null;
 
     if (paused) {
       await this.runSerialized(async () => {
@@ -1177,6 +1203,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     this.page = null;
     this.context = null;
     this.browser = null;
+    this.storedGroupCandidatesCache = null;
 
     if (browser) {
       browser.removeAllListeners();
@@ -1215,7 +1242,8 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
           return;
         }
 
-        this.scheduleNextPoll(this.onEvent, WATCHER_DOM_OBSERVER_DEBOUNCE_MS);
+        this.instrumentation.mutationSignals += 1;
+        this.scheduleNextPoll(this.onEvent, WATCHER_DOM_OBSERVER_DEBOUNCE_MS, 'mutation');
       });
       this.observerBoundPages.add(page);
     }
@@ -1274,6 +1302,10 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       logger.info('watcher_playwright_mutation_observer_attached', {
         debounceMs: WATCHER_DOM_OBSERVER_DEBOUNCE_MS,
         safetyPollIntervalMs: env.WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS,
+        coalescingEnabled: env.WATCHER_PLAYWRIGHT_POLL_COALESCING_ENABLED,
+        minimumPollIntervalMs: env.WATCHER_PLAYWRIGHT_POLL_MIN_INTERVAL_MS,
+        trailingDebounceMs: env.WATCHER_PLAYWRIGHT_POLL_TRAILING_DEBOUNCE_MS,
+        trailingMaxWaitMs: env.WATCHER_PLAYWRIGHT_POLL_TRAILING_MAX_WAIT_MS,
       });
     }
   }
@@ -1299,8 +1331,14 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
   private scheduleNextPoll(
     onEvent: (event: SourceMessageEvent) => Promise<void>,
     delayMs = env.WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS,
+    reason: WatcherPollRequestReason = 'safety',
   ) {
     if (this.stopped || this.paused) {
+      return;
+    }
+
+    if (env.WATCHER_PLAYWRIGHT_POLL_COALESCING_ENABLED) {
+      this.getPollCoordinator().request(reason, delayMs);
       return;
     }
 
@@ -1322,15 +1360,22 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       return;
     }
 
+    const startedAtMs = Date.now();
+    this.instrumentation.pollRuns += 1;
+
     try {
       await this.runSerialized(() =>
         this.withRecoveredBrowser('poll', () => this.poll(onEvent, isInitial, suppressEvents)),
       );
     } catch (error) {
+      this.instrumentation.pollFailures += 1;
       logger.warn('watcher_playwright_poll_failed', {
         error: error instanceof Error ? error.message : String(error),
       });
     } finally {
+      const durationMs = Date.now() - startedAtMs;
+      this.instrumentation.pollDurationTotalMs += durationMs;
+      this.instrumentation.pollDurationMaxMs = Math.max(this.instrumentation.pollDurationMaxMs, durationMs);
       if (!this.stopped && !this.paused && this.page && !this.page.isClosed()) {
         await this.runSerialized(() => this.installMutationObserver(this.page as Page)).catch((error) => {
           logger.warn('watcher_playwright_mutation_observer_failed', {
@@ -1340,7 +1385,53 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       }
 
       this.scheduleNextPoll(onEvent);
+      this.maybeLogInstrumentation();
     }
+  }
+
+  private getPollCoordinator() {
+    if (this.pollCoordinator) {
+      return this.pollCoordinator;
+    }
+
+    this.pollCoordinator = new WatcherPollCoordinator({
+      minimumIntervalMs: env.WATCHER_PLAYWRIGHT_POLL_MIN_INTERVAL_MS,
+      trailingDebounceMs: env.WATCHER_PLAYWRIGHT_POLL_TRAILING_DEBOUNCE_MS,
+      trailingMaxWaitMs: env.WATCHER_PLAYWRIGHT_POLL_TRAILING_MAX_WAIT_MS,
+      run: async () => {
+        if (this.stopped || this.paused || !this.onEvent) {
+          return;
+        }
+        await this.runPollCycle(this.onEvent, false);
+      },
+    });
+    return this.pollCoordinator;
+  }
+
+  private maybeLogInstrumentation() {
+    if (!env.WATCHER_PLAYWRIGHT_B0_INSTRUMENTATION_ENABLED) {
+      return;
+    }
+
+    const now = Date.now();
+    if (now - this.lastInstrumentationLogAtMs < env.WATCHER_PLAYWRIGHT_METRICS_LOG_INTERVAL_MS) {
+      return;
+    }
+
+    const windowMs = Math.max(1, now - this.instrumentationWindowStartedAtMs);
+    logger.info('watcher_playwright_poll_metrics', {
+      windowMs,
+      pollRatePerMinute: Number(((this.instrumentation.pollRuns * 60_000) / windowMs).toFixed(2)),
+      averagePollDurationMs:
+        this.instrumentation.pollRuns === 0
+          ? 0
+          : Math.round(this.instrumentation.pollDurationTotalMs / this.instrumentation.pollRuns),
+      ...this.instrumentation,
+      coordinator: this.pollCoordinator?.getMetrics() ?? null,
+      localStorageCacheEnabled: env.WATCHER_PLAYWRIGHT_LOCAL_STORAGE_CACHE_ENABLED,
+      localStorageCacheTtlMs: env.WATCHER_PLAYWRIGHT_LOCAL_STORAGE_CACHE_TTL_MS,
+    });
+    this.lastInstrumentationLogAtMs = now;
   }
 
   private async buildPageCandidate(page: Page, index: number) {
@@ -2201,7 +2292,22 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     }
     return null;
   }
-  private async readStoredGroupCandidates(page: Page) {
+  private async readStoredGroupCandidates(page: Page, options: { forceRefresh?: boolean } = {}) {
+    const now = Date.now();
+    if (
+      env.WATCHER_PLAYWRIGHT_LOCAL_STORAGE_CACHE_ENABLED &&
+      !options.forceRefresh &&
+      this.storedGroupCandidatesCache?.page === page &&
+      this.storedGroupCandidatesCache.expiresAtMs > now
+    ) {
+      this.instrumentation.localStorageCacheHits += 1;
+      return this.storedGroupCandidatesCache.candidates;
+    }
+
+    if (env.WATCHER_PLAYWRIGHT_LOCAL_STORAGE_CACHE_ENABLED) {
+      this.instrumentation.localStorageCacheMisses += 1;
+    }
+    this.instrumentation.localStorageScans += 1;
     const localStorageEntries = (await page.evaluate(() => {
       const entries: Array<[string, string]> = [];
 
@@ -2224,7 +2330,48 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       return entries;
     })) as Array<[string, string]>;
 
-    return parseStoredGroupCandidates(localStorageEntries);
+    const parsedCandidates = parseStoredGroupCandidates(localStorageEntries);
+    if (!env.WATCHER_PLAYWRIGHT_LOCAL_STORAGE_CACHE_ENABLED) {
+      return parsedCandidates;
+    }
+
+    const candidates = parsedCandidates.map((candidate) => ({
+      ...candidate,
+      lastReceiveTs: null,
+    }));
+    if (env.WATCHER_PLAYWRIGHT_LOCAL_STORAGE_CACHE_ENABLED) {
+      this.storedGroupCandidatesCache = {
+        page,
+        expiresAtMs: now + env.WATCHER_PLAYWRIGHT_LOCAL_STORAGE_CACHE_TTL_MS,
+        candidates,
+      };
+    }
+    return candidates;
+  }
+
+  private async readFreshLastReceiveTimestamps(page: Page, externalIds: string[]) {
+    const uniqueExternalIds = Array.from(
+      new Set(externalIds.filter((externalId) => externalId && externalId.length <= 200)),
+    ).slice(0, WATCHER_MAX_LIVE_SNAPSHOT_LIMIT);
+    if (uniqueExternalIds.length === 0) {
+      return new Map<string, number>();
+    }
+
+    this.instrumentation.localStorageTimestampReads += 1;
+    this.instrumentation.localStorageTimestampKeys += uniqueExternalIds.length;
+    const entries = (await page.evaluate((conversationIds) => {
+      const values: Array<[string, number]> = [];
+      for (const conversationId of conversationIds) {
+        const rawValue = localStorage.getItem(`0_${conversationId}_lastReceiveTs`);
+        const timestamp = rawValue === null ? Number.NaN : Number(rawValue);
+        if (Number.isFinite(timestamp) && timestamp > 0) {
+          values.push([conversationId, timestamp]);
+        }
+      }
+      return values;
+    }, uniqueExternalIds)) as Array<[string, number]>;
+
+    return new Map(entries);
   }
 
   private async collectTopSnapshotsFromCurrentCategory(page: Page, limit: number) {
@@ -2536,11 +2683,17 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
     const liveSnapshotLimit = this.getLiveSnapshotLimit();
     const immediateConversationLimit = this.getImmediateConversationLimit();
 
-    const [initialSnapshots, storedGroups] = await Promise.all([
-      this.collectTopSnapshots(page, liveSnapshotLimit),
-      this.readStoredGroupCandidates(page),
-    ]);
-    let snapshots = initialSnapshots;
+    let storedGroups: StoredGroupCandidate[] | null = null;
+    let snapshots: ConversationSnapshot[];
+
+    if (env.WATCHER_PLAYWRIGHT_LOCAL_STORAGE_CACHE_ENABLED) {
+      snapshots = await this.collectTopSnapshots(page, liveSnapshotLimit);
+    } else {
+      [snapshots, storedGroups] = await Promise.all([
+        this.collectTopSnapshots(page, liveSnapshotLimit),
+        this.readStoredGroupCandidates(page),
+      ]);
+    }
 
     if (snapshots.length === 0) {
       await this.recoverConversationList(page, 'empty_live_snapshot_scan');
@@ -2560,14 +2713,29 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
       this.consecutiveEmptySnapshotPolls = 0;
     }
 
-    logger.info('watcher_playwright_live_poll_completed', {
-      liveSnapshots: snapshots.length,
-      storedGroups: storedGroups.length,
-      liveSnapshotLimit,
-      immediateConversationLimit,
-    });
+    const lastReceiveTimestamps = env.WATCHER_PLAYWRIGHT_LOCAL_STORAGE_CACHE_ENABLED
+      ? await this.readFreshLastReceiveTimestamps(
+          page,
+          snapshots.map((snapshot) => snapshot.animDataId),
+        )
+      : new Map((storedGroups ?? []).map((group) => [group.externalId, group.lastReceiveTs]));
 
-    const storedGroupMap = new Map(storedGroups.map((group) => [group.externalId, group]));
+    if (env.WATCHER_PLAYWRIGHT_LOCAL_STORAGE_CACHE_ENABLED) {
+      logger.info('watcher_playwright_live_poll_completed', {
+        liveSnapshots: snapshots.length,
+        freshLastReceiveTimestamps: lastReceiveTimestamps.size,
+        liveSnapshotLimit,
+        immediateConversationLimit,
+      });
+    } else {
+      logger.info('watcher_playwright_live_poll_completed', {
+        liveSnapshots: snapshots.length,
+        storedGroups: storedGroups?.length ?? 0,
+        liveSnapshotLimit,
+        immediateConversationLimit,
+      });
+    }
+
     let stateChanged = this.rememberSnapshotNames(snapshots);
     let activeCategoryKey: ConversationCategoryKey | null = null;
     let staleCandidates = 0;
@@ -2589,7 +2757,7 @@ export class PlaywrightConversationListAdapter implements SourceAdapter {
         continue;
       }
 
-      const lastReceiveTs = storedGroupMap.get(snapshot.animDataId)?.lastReceiveTs ?? null;
+      const lastReceiveTs = lastReceiveTimestamps.get(snapshot.animDataId) ?? null;
       const signature = buildConversationSignature({
         conversationId: snapshot.animDataId,
         preview: snapshot.preview,
