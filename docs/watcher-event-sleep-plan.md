@@ -1,23 +1,23 @@
-# Kế hoạch watcher realtime nhẹ tải và lịch nghỉ
+# Watcher realtime và lịch nghỉ
 
 ## Mục tiêu
 
-- Phát hiện tin Zalo gần realtime mà không quét toàn bộ giao diện liên tục.
-- Giảm CPU Chromium/Playwright trên VPS và giảm request không cần thiết tới Vercel/Supabase.
+- Nhận tin nhắn nhóm Zalo theo sự kiện websocket bằng `zca-js`.
+- Không cần Chromium, Playwright, GUI, VNC hoặc quét DOM trên VPS.
 - Cho phép quản trị lịch nghỉ hằng ngày trên web.
 - Mặc định nghỉ từ `01:00` đến `06:00`, múi giờ `Asia/Ho_Chi_Minh`.
 - Trong giờ nghỉ, watcher **không đọc, không lưu, không gửi bù** tin Zalo phát sinh trong khoảng đó.
-- Giữ nguyên Chromium profile và phiên Zalo đang đăng nhập.
+- Lưu phiên đăng nhập Zalo trong tệp credentials riêng, quyền `0600`.
 
 ## Kiến trúc mục tiêu
 
 ### Phát hiện tin
 
-1. Gắn `MutationObserver` vào vùng danh sách hội thoại Zalo.
-2. Debounce các thay đổi DOM trong thời gian ngắn và gom nhiều mutation thành một lần xử lý.
-3. Chạy cùng pipeline đọc tin, chống trùng và lọc luật hiện có.
-4. Giữ safety poll định kỳ để tự phục hồi khi observer bị mất do Zalo thay DOM hoặc reload trang.
-5. Mỗi lần safety poll hoàn tất sẽ gắn lại observer vào node danh sách hiện tại.
+1. Đăng nhập bằng credentials đã lưu; nếu chưa có hoặc hết hạn thì tạo mã QR.
+2. Mở một listener websocket và chỉ nhận tin nhắn nhóm từ tài khoản khác.
+3. Chuẩn hóa sự kiện về contract ingest hiện có.
+4. Dùng pipeline chống trùng, lọc luật và hàng đợi Telegram hiện có.
+5. Tự kết nối lại với exponential backoff có giới hạn khi socket bị ngắt.
 
 ### Lịch nghỉ
 
@@ -29,15 +29,11 @@
 3. API config trả lịch nghỉ cùng danh sách nhóm và luật.
 4. Runtime kiểm tra lịch bằng đồng hồ theo múi giờ cấu hình.
 5. Khi bước vào giờ nghỉ:
-   - hủy timer poll;
-   - tháo `MutationObserver`;
-   - không đọc DOM và không gọi API ingest;
-   - giữ Chromium và process PM2 hoạt động;
+   - giữ phiên websocket hoạt động;
+   - bỏ qua sự kiện đến và không gọi API ingest;
    - ngừng heartbeat định kỳ, nhưng vẫn đồng bộ config nhẹ để thay đổi từ web có thể được nhận.
 6. Khi kết thúc giờ nghỉ:
-   - chạy một vòng baseline chỉ để ghi nhận trạng thái DOM hiện tại;
-   - không emit các tin xuất hiện trong giờ nghỉ;
-   - gắn lại observer;
+   - không gửi bù các tin đã bị bỏ qua trong giờ nghỉ;
    - gửi heartbeat online và trở về realtime.
 
 ## Hành vi qua ngày
@@ -48,12 +44,11 @@
 - Nếu lịch bị tắt trên web, watcher tiếp tục hoạt động sau lần đồng bộ config kế tiếp.
 - Không thay đổi định dạng Telegram, luật include/exclude hoặc cơ chế chống trùng hiện tại.
 
-## Thay đổi dữ liệu và API
+## Dữ liệu và API
 
-- Thêm bảng cấu hình runtime một-một theo watcher, với giá trị mặc định an toàn.
-- Thêm migration chỉ bổ sung bảng/index, không xóa hoặc sửa dữ liệu hiện hữu.
-- Thêm endpoint admin có xác thực để cập nhật lịch.
-- Mở rộng `/api/watcher/config` để trả lịch nghỉ cho đúng watcher.
+- Giữ nguyên schema Supabase vì các bảng watcher, nhóm, tin nhắn, luật và hàng đợi đều độc lập với Playwright.
+- `/api/watcher/config` tiếp tục trả lịch nghỉ, nhóm và luật theo watcher.
+- `/api/watcher/ingest` và worker Telegram giữ nguyên contract.
 
 ## Giao diện web
 
@@ -68,37 +63,35 @@ Tại trang Watcher, mỗi watcher có form:
 
 ## An toàn và chống mất phiên
 
-- Không dừng hoặc xóa process Chromium.
-- Không xóa, đổi tên hoặc dùng chung Chromium profile.
+- Không commit credentials hoặc ảnh QR vào Git.
+- Dùng đường dẫn bền vững ngoài release, khuyến nghị dưới `/var/lib/zalo-keyword-filter`.
+- Chỉ chạy một listener cho cùng một tài khoản Zalo.
 - Không tự động phát lại tin trong giờ nghỉ.
-- Observer chỉ theo dõi vùng hội thoại, không theo dõi toàn bộ `body` để tránh mutation storm.
-- Mọi callback Playwright đi qua hàng đợi tuần tự hiện có để tránh hai thao tác browser chạy đồng thời.
+- Mọi callback websocket đi qua hàng đợi tuần tự để giữ đúng thứ tự ingest.
 
 ## Kiểm thử và tiêu chí nghiệm thu
 
 - Unit test tính giờ nghỉ theo `Asia/Ho_Chi_Minh`, gồm lịch cùng ngày và qua nửa đêm.
 - Unit test chuẩn hóa `HH:mm` sang phút và ngược lại.
-- Unit test adapter: pause hủy lịch quét; resume baseline không emit tin cũ.
+- Unit test adapter: ánh xạ tin nhóm, bỏ tin trực tiếp/tự gửi, nội dung nhiều dòng, attachment và timestamp.
 - Typecheck, lint, toàn bộ unit test và production build đều thành công.
-- Migration chạy thành công trên Supabase.
 - Web lưu và đọc lại được cấu hình `01:00–06:00`.
-- VPS log xác nhận observer được gắn, watcher vào/ra pause đúng trạng thái.
-- Trong giờ nghỉ không có log poll, ingest hoặc heartbeat.
-- Chromium, worker và watcher vẫn online trong PM2.
+- VPS log xác nhận listener kết nối và watcher vào/ra pause đúng trạng thái.
+- Trong giờ nghỉ không có ingest hoặc gửi Telegram.
+- Worker và watcher vẫn online trong PM2; Chromium cũ được tắt sau canary thành công.
 
 ## Trình tự triển khai production
 
-1. Backup source, `.env`, PM2 dump, watcher state và log trên VPS.
-2. Commit code và migration cục bộ nhưng chưa cập nhật runtime.
-3. Chạy migration bổ sung trên Supabase trước khi backend mới nhận traffic.
-4. Push GitHub để Vercel build/deploy.
-5. Đồng bộ đúng commit sang VPS, giữ nguyên `.env`, `data`, `node_modules` và Chromium profile.
-6. Cập nhật safety poll, restart watcher/healthcheck bằng PM2 và lưu PM2 dump.
-7. Đặt cấu hình production mặc định `01:00–06:00`, `Asia/Ho_Chi_Minh`, bật lịch nghỉ.
-8. Kiểm tra API config, log watcher, PM2 restart count và một vòng observer/poll.
+1. Backup source, `.env`, PM2 dump, watcher state và Supabase.
+2. Commit/push branch migration và xác nhận Vercel build thành công.
+3. Dựng release mới cạnh release cũ, không ghi đè production.
+4. Dừng riêng watcher/Chromium Zalo cũ, khởi động canary `zca-js` trong khi trạng thái nghiệp vụ vẫn dừng.
+5. Quét QR khi được yêu cầu, xác nhận websocket và đồng bộ nhóm.
+6. Chỉ khi người quản trị chủ động cho watcher chạy, gửi tin kiểm thử chứa keyword và xác nhận đầy đủ Zalo → ingest → queue → Telegram.
+7. Chuyển PM2 watcher sang release mới; tắt healthcheck/Chromium cũ; không restart PM2 toàn bộ.
 
 ## Rollback
 
-- Khôi phục archive source và `.env` từ backup VPS.
-- Restart watcher/healthcheck rồi `pm2 save`.
-- Bảng cấu hình mới có thể giữ lại vì code cũ không sử dụng; không cần migration phá hủy dữ liệu để rollback runtime.
+- Dừng watcher `zca-js`, khởi động lại đúng release Playwright cũ và các tiến trình Zalo Chromium/healthcheck cũ.
+- Khôi phục `.env`/PM2 config từ backup nếu đã thay đổi.
+- Không cần rollback database vì migration này không thay đổi schema hoặc dữ liệu.

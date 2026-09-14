@@ -1,19 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { IMPLEMENTATION_DEFAULTS } from "@/src/config/constants";
-import { env, estimateWatcherMessageDeliveryDelayMs } from "@/src/config/env";
+import { env } from "@/src/config/env";
 import { deriveWatcherStatus } from "@/src/modules/watchers/watchers.service";
 import { requireWatcherApiKey } from "@/src/server/guards/watcher.guard";
 
-test("watcher runtime defaults stay within the two-minute message delivery budget", () => {
-  const estimatedDelayMs = estimateWatcherMessageDeliveryDelayMs({
-    pollIntervalMs: env.WATCHER_PLAYWRIGHT_POLL_INTERVAL_MS,
-    ingestTimeoutMs: env.WATCHER_INGEST_TIMEOUT_MS,
-    retryBaseDelayMs: env.WATCHER_RETRY_BASE_DELAY_MS,
-    retryMaxDelayMs: env.WATCHER_RETRY_MAX_DELAY_MS,
-  });
-
-  assert.ok(estimatedDelayMs <= IMPLEMENTATION_DEFAULTS.watcherMessageDeliverySloMs);
+test("watcher ZCA reconnect defaults use a bounded exponential backoff", () => {
+  assert.ok(env.WATCHER_ZCA_RECONNECT_BASE_DELAY_MS > 0);
+  assert.ok(env.WATCHER_ZCA_RECONNECT_MAX_DELAY_MS >= env.WATCHER_ZCA_RECONNECT_BASE_DELAY_MS);
 });
 
 test("watcher status tolerates the five-minute heartbeat interval", () => {

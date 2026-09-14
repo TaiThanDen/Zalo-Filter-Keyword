@@ -30,6 +30,17 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
+# Zalo personal-account session material
+/data/zca-credentials.json
+/data/zca-credentials.json.tmp
+/data/zca-login-qr.png
+
+# Local diagnostics and generated audit artifacts
+/.codex/
+/.tmp_*
+/output/
+/tmp/
+
 # env files (can opt-in for committing if needed)
 .env*
 

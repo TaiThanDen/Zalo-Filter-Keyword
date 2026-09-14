@@ -1,6 +1,6 @@
 ﻿# Zalo Alert Admin
 
-Next.js fullstack admin + API for monitored message alerts, with PostgreSQL/Prisma, DB-backed `notification_delivery` queue, a separate worker runtime, and a watcher runtime with a built-in simulator.
+Next.js fullstack admin + API for monitored message alerts, with PostgreSQL/Prisma, DB-backed delivery queues, a separate worker runtime, and a headless Zalo personal-account watcher powered by `zca-js`.
 
 ## What is included
 
@@ -17,7 +17,7 @@ Next.js fullstack admin + API for monitored message alerts, with PostgreSQL/Pris
 - Worker runtime for Telegram delivery
 - Watcher simulator using fixture payloads
 - Logs UI and watcher status UI
-- Import script to sync visible Zalo groups into `group`
+- Headless `zca-js` listener and automatic Zalo group synchronization
 
 ## Local setup
 
@@ -30,6 +30,19 @@ Next.js fullstack admin + API for monitored message alerts, with PostgreSQL/Pris
 7. Start the app: `npm run dev`
 8. Start the worker: `npm run worker`
 9. Start the watcher simulator: `npm run watcher:mock`
+
+## Zalo watcher on a VPS
+
+The production watcher uses the unofficial `zca-js` protocol client and does not need Chromium, VNC, Playwright, or a Zalo GUI. On the first start (or after credentials expire), it writes a QR image to `WATCHER_ZCA_QR_FILE`. Scan and approve that QR from the Zalo mobile app. Successful credentials are persisted at `WATCHER_ZCA_CREDENTIALS_FILE`; keep that file outside the release directory with mode `600`.
+
+Recommended VPS values:
+
+```env
+WATCHER_ZCA_CREDENTIALS_FILE=/var/lib/zalo-keyword-filter/zca-credentials.json
+WATCHER_ZCA_QR_FILE=/var/lib/zalo-keyword-filter/zca-login-qr.png
+```
+
+Only one Zalo web-protocol listener should run for an account. Do not open Zalo Web with the same account while this watcher is active. The admin pause control remains authoritative: while paused, the socket stays connected to preserve the session, but incoming events are discarded and are not replayed later.
 
 ## Default admin credentials
 
@@ -44,7 +57,6 @@ Next.js fullstack admin + API for monitored message alerts, with PostgreSQL/Pris
 - `npm run bootstrap-admin`
 - `npm run worker`
 - `npm run watcher:mock`
-- `npm run groups:import`
 
 ## API highlights
 
@@ -86,7 +98,6 @@ Next.js fullstack admin + API for monitored message alerts, with PostgreSQL/Pris
 
 ## Current limitations
 
-- Phase 1 supports Telegram only for actual delivery.
-- Watcher simulator runs a mock adapter; no real source adapter is included.
-- Delivery queue is PostgreSQL-backed and intentionally simple for MVP scale.
+- Actual alert delivery currently supports Telegram only.
+- `zca-js` is an unofficial Zalo client and may require a new QR login when Zalo changes its protocol or invalidates the stored session.
 - Soft delete is not implemented; destructive admin deletes are hard deletes in MVP.

@@ -322,10 +322,6 @@ function scheduleRecurringTask(
   }, intervalMs);
 }
 
-function shouldSyncGroupsFromBrowser() {
-  return !env.WATCHER_PLAYWRIGHT_FAST_PREVIEW_ONLY && !env.WATCHER_PLAYWRIGHT_RULE_PREFILTER_ENABLED;
-}
-
 async function syncGroupsFromAdapter(adapter: SourceAdapter) {
   const groups = await adapter.listGroups();
 
@@ -376,14 +372,15 @@ async function main() {
     await messageDispatcher.enqueue(payload);
   };
 
-  if (!sleeping && shouldSyncGroupsFromBrowser()) {
-    await syncGroupsFromAdapter(adapter);
-  }
+  adapter.setConnectionStatusHandler?.(async (online) => {
+    await sendHeartbeat(!sleeping && online ? "online" : "offline");
+  });
+
   if (!sleeping) {
     await flushBuffer(deliverMessages);
   }
   await adapter.start(handleSourceEvent);
-  if (!sleeping && shouldSyncGroupsFromBrowser()) {
+  if (!sleeping) {
     await syncGroupsFromAdapter(adapter);
   }
 
@@ -425,7 +422,13 @@ async function main() {
 
   scheduleRecurringTask("watcher_heartbeat", env.WATCHER_HEARTBEAT_INTERVAL_MS, async () => {
     if (!sleeping) {
-      await sendHeartbeat();
+      await sendHeartbeat(adapter.isHealthy?.() === false ? "offline" : "online");
+    }
+  });
+
+  scheduleRecurringTask("watcher_group_sync", env.WATCHER_ZCA_GROUP_SYNC_INTERVAL_MS, async () => {
+    if (!sleeping && adapter.isHealthy?.() !== false) {
+      await syncGroupsFromAdapter(adapter);
     }
   });
 
@@ -435,10 +438,36 @@ async function main() {
     await reconcileSleepState("config_refresh");
     await adapter.seedKnownGroups?.(toSeedableGroups(refreshedConfig));
     await adapter.seedRules?.(toSeedableRules(refreshedConfig));
+  });
 
-    if (!sleeping && shouldSyncGroupsFromBrowser()) {
-      await syncGroupsFromAdapter(adapter);
+  let shuttingDown = false;
+  const shutdown = async (signal: string) => {
+    if (shuttingDown) {
+      return;
     }
+
+    shuttingDown = true;
+    logger.info("watcher_shutdown_started", { signal });
+
+    try {
+      await adapter.stop();
+      await messageDispatcher.flush();
+      await sendHeartbeat("offline");
+    } catch (error) {
+      logger.warn("watcher_shutdown_failed", {
+        signal,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    process.exit(0);
+  };
+
+  process.once("SIGINT", () => {
+    void shutdown("SIGINT");
+  });
+  process.once("SIGTERM", () => {
+    void shutdown("SIGTERM");
   });
 }
 
