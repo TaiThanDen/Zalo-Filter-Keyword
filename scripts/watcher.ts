@@ -18,6 +18,26 @@ import {
 
 const WATCHER_MESSAGE_BATCH_SIZE = 3;
 
+async function retryStartupOperation<T>(name: string, operation: () => Promise<T>) {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      logger.warn("watcher_startup_operation_failed", {
+        name,
+        attempt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      if (attempt < 3) {
+        await new Promise((resolve) => setTimeout(resolve, attempt * 2_000));
+      }
+    }
+  }
+  throw lastError;
+}
+
 async function fetchConfig() {
   const response = await fetch(`${env.WATCHER_API_BASE_URL}/api/watcher/config`, {
     headers: {
@@ -347,7 +367,7 @@ async function main() {
 
   logger.info("watcher_started", { mode });
 
-  const config = await fetchConfig();
+  const config = await retryStartupOperation("config", fetchConfig);
   runtimeControl = toRuntimeControl(config);
   sleeping = resolveWatcherRuntimeState(runtimeControl).paused;
   const seedableGroups = toSeedableGroups(config);

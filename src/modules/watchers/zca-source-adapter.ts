@@ -299,18 +299,23 @@ export class ZcaSourceAdapter implements SourceAdapter {
   }
 
   private async login(allowQrLogin: boolean) {
-    const zalo = new Zalo({ logging: false, selfListen: false });
     const credentials = await this.readCredentials();
 
     if (credentials) {
-      try {
-        const api = await zalo.login(credentials);
-        logger.info("watcher_zca_credentials_login_succeeded");
-        return api;
-      } catch (error) {
-        logger.warn("watcher_zca_credentials_login_failed", {
-          error: error instanceof Error ? error.message : String(error),
-        });
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          const api = await new Zalo({ logging: false, selfListen: false }).login(credentials);
+          logger.info("watcher_zca_credentials_login_succeeded", { attempt });
+          return api;
+        } catch (error) {
+          logger.warn("watcher_zca_credentials_login_failed", {
+            attempt,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (attempt < 3) {
+            await new Promise((resolve) => setTimeout(resolve, attempt * 2_000));
+          }
+        }
       }
     }
 
@@ -321,6 +326,7 @@ export class ZcaSourceAdapter implements SourceAdapter {
     await mkdir(dirname(env.WATCHER_ZCA_QR_FILE), { recursive: true });
     logger.warn("watcher_zca_qr_login_required", { qrFile: env.WATCHER_ZCA_QR_FILE });
 
+    const zalo = new Zalo({ logging: false, selfListen: false });
     let capturedCredentials: Credentials | null = null;
     const api = await zalo.loginQR({ qrPath: env.WATCHER_ZCA_QR_FILE }, (event) => {
       if (event.type === LoginQRCallbackEventType.QRCodeGenerated) {
