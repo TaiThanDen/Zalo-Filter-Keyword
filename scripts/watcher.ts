@@ -383,7 +383,11 @@ async function main() {
   }
   await adapter.start(handleSourceEvent);
   if (!sleeping) {
-    await syncGroupsFromAdapter(adapter);
+    void syncGroupsFromAdapter(adapter).catch((error) => {
+      logger.warn("watcher_initial_group_sync_failed", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
   }
 
   const reconcileSleepState = (reason: string) => {
