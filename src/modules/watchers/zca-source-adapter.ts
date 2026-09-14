@@ -244,14 +244,18 @@ export class ZcaSourceAdapter implements SourceAdapter {
       }
     }
 
-    return this.cachedGroups();
+    return this.groupsForIds(groupIds);
   }
 
   private cachedGroups() {
-    return Array.from(this.groupNames, ([externalId, name]) => ({
+    return this.groupsForIds(Array.from(this.groupNames.keys()));
+  }
+
+  private groupsForIds(groupIds: string[]) {
+    return groupIds.map((externalId) => ({
       source: "zalo" as const,
       externalId: toStoredZaloGroupId(externalId),
-      name,
+      name: this.groupNames.get(externalId) ?? toStoredZaloGroupId(externalId),
     })).sort((left, right) => left.name.localeCompare(right.name, "vi"));
   }
 
