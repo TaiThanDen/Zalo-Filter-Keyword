@@ -21,6 +21,14 @@ function normalizeGroupName(name?: string | null) {
   return normalized ? normalized : null;
 }
 
+export function dedupeDiscoveredGroups(
+  groups: Array<{ source: string; externalId: string; name: string }>,
+) {
+  return Array.from(
+    new Map(groups.map((group) => [`${group.source}\u0000${group.externalId}`, group])).values(),
+  );
+}
+
 function shouldUpdateDiscoveredGroupName(
   existing: { name: string; externalId: string },
   nextName?: string | null,
@@ -306,37 +314,79 @@ export const groupsRepository = {
     watcherId: string,
     groups: Array<{ source: string; externalId: string; name: string }>,
   ) {
-    const uniqueGroups = groups.filter(
-      (group, index, items) =>
-        items.findIndex(
-          (candidate) =>
-            candidate.source === group.source && candidate.externalId === group.externalId,
-        ) === index,
-    );
+    const uniqueGroups = dedupeDiscoveredGroups(groups);
+    if (uniqueGroups.length === 0) return { total: 0, created: 0, updated: 0 };
 
-    let created = 0;
-    let updated = 0;
+    return db.$transaction(async (tx) => {
+      const keys = uniqueGroups.map(({ source, externalId }) => ({ source, externalId }));
+      const existingGroups = await tx.group.findMany({
+        where: { OR: keys },
+        select: { id: true, source: true, externalId: true, name: true, watcherId: true },
+      });
+      const existingByKey = new Map(
+        existingGroups.map((group) => [`${group.source}\u0000${group.externalId}`, group]),
+      );
+      const missingGroups = uniqueGroups.filter(
+        (group) => !existingByKey.has(`${group.source}\u0000${group.externalId}`),
+      );
+      const updates = uniqueGroups.flatMap((group) => {
+        const existing = existingByKey.get(`${group.source}\u0000${group.externalId}`);
+        if (!existing) return [];
 
-    for (const group of uniqueGroups) {
-      const result = await groupsRepository.ensureDiscoveredGroup({
-        source: group.source,
-        externalId: group.externalId,
-        name: group.name,
-        watcherId,
+        const normalizedName = normalizeGroupName(group.name) ?? group.externalId;
+        const nextName = shouldUpdateDiscoveredGroupName(existing, normalizedName)
+          ? normalizedName
+          : undefined;
+        const nextWatcherId = existing.watcherId ?? watcherId;
+        if (!nextName && existing.watcherId === nextWatcherId) return [];
+
+        return [{ id: existing.id, name: nextName, watcherId: nextWatcherId }];
       });
 
-      if (result.created) {
-        created += 1;
-      } else if (result.updated) {
-        updated += 1;
-      }
-    }
+      const created = missingGroups.length > 0
+        ? await tx.group.createMany({
+          data: missingGroups.map((group) => ({
+            source: group.source,
+            externalId: group.externalId,
+            name: normalizeGroupName(group.name) ?? group.externalId,
+            isEnabled: true,
+            watcherId,
+          })),
+          skipDuplicates: true,
+        })
+        : { count: 0 };
 
-    return {
-      total: uniqueGroups.length,
-      created,
-      updated,
-    };
+      await Promise.all(updates.map((group) => tx.group.update({
+        where: { id: group.id },
+        data: {
+          ...(group.name ? { name: group.name } : {}),
+          watcherId: group.watcherId,
+        },
+      })));
+
+      if (missingGroups.length > 0) {
+        const [createdGroups, rules] = await Promise.all([
+          tx.group.findMany({
+            where: {
+              OR: missingGroups.map(({ source, externalId }) => ({ source, externalId })),
+            },
+            select: { id: true },
+          }),
+          tx.rule.findMany({ select: { id: true } }),
+        ]);
+
+        if (createdGroups.length > 0 && rules.length > 0) {
+          await tx.groupRule.createMany({
+            data: createdGroups.flatMap((group) =>
+              rules.map((rule) => ({ groupId: group.id, ruleId: rule.id })),
+            ),
+            skipDuplicates: true,
+          });
+        }
+      }
+
+      return { total: uniqueGroups.length, created: created.count, updated: updates.length };
+    });
   },
   listForWatcher(watcherId: string) {
     return db.group.findMany({
