@@ -199,7 +199,11 @@ export class ZcaSourceAdapter implements SourceAdapter {
   }
 
   async seedKnownGroups(groups: DiscoveredSourceGroup[]) {
+    const storedIds = new Set(groups.map((group) => group.externalId));
     for (const group of groups) {
+      if (/^\d+$/.test(group.externalId) && storedIds.has(`g${group.externalId}`)) {
+        continue;
+      }
       this.groupNames.set(toZcaGroupId(group.externalId), group.name);
     }
   }

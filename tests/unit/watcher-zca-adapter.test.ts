@@ -6,6 +6,7 @@ import {
   mapZcaGroupMessage,
   resolveZcaMessageTime,
   toStoredZaloGroupId,
+  ZcaSourceAdapter,
 } from "@/src/modules/watchers/zca-source-adapter";
 
 function createMessage(overrides: Record<string, unknown> = {}) {
@@ -56,6 +57,18 @@ test("keeps compatibility with Playwright-era stored group IDs", () => {
   assert.equal(toStoredZaloGroupId("1570549445668107973"), "g1570549445668107973");
   assert.equal(toStoredZaloGroupId("g1570549445668107973"), "g1570549445668107973");
   assert.equal(toStoredZaloGroupId("custom-group-id"), "custom-group-id");
+});
+
+test("prefers the named legacy group over a temporary bare-ID duplicate", async () => {
+  const adapter = new ZcaSourceAdapter();
+  await adapter.seedKnownGroups([
+    { source: "zalo", externalId: "g1570549445668107973", name: "JOB Hồ Chí Minh" },
+    { source: "zalo", externalId: "1570549445668107973", name: "1570549445668107973" },
+  ]);
+
+  assert.deepEqual(await adapter.listGroups(), [
+    { source: "zalo", externalId: "g1570549445668107973", name: "JOB Hồ Chí Minh" },
+  ]);
 });
 
 test("ignores direct messages and messages sent by the logged-in account", () => {
