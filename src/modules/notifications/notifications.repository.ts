@@ -17,10 +17,25 @@ function normalizeNotificationIdentity(value: string | null | undefined) {
 }
 
 const notificationChannelWithRulesArgs = Prisma.validator<Prisma.NotificationChannelDefaultArgs>()({
-  include: {
+  select: {
+    id: true,
+    type: true,
+    name: true,
+    isActive: true,
+    config: true,
+    createdAt: true,
+    updatedAt: true,
     notificationChannelRules: {
-      include: {
-        rule: true,
+      select: {
+        ruleId: true,
+        rule: {
+          select: {
+            id: true,
+            pattern: true,
+            isActive: true,
+            note: true,
+          },
+        },
       },
       orderBy: {
         rule: {
@@ -117,14 +132,29 @@ function isOutboxDedupeConflict(error: unknown) {
 export const notificationsRepository = {
   listChannels() {
     return db.notificationChannel.findMany({
-      include: notificationChannelWithRulesArgs.include,
+      ...notificationChannelWithRulesArgs,
       orderBy: { updatedAt: 'desc' },
+    });
+  },
+  listActiveDeliveryChannels() {
+    return db.notificationChannel.findMany({
+      where: { isActive: true },
+      select: {
+        id: true,
+        type: true,
+        config: true,
+        notificationChannelRules: {
+          select: {
+            ruleId: true,
+          },
+        },
+      },
     });
   },
   findChannelById(id: string) {
     return db.notificationChannel.findUnique({
       where: { id },
-      include: notificationChannelWithRulesArgs.include,
+      ...notificationChannelWithRulesArgs,
     });
   },
   createChannel(data: {
@@ -153,7 +183,7 @@ export const notificationsRepository = {
             }
           : {}),
       },
-      include: notificationChannelWithRulesArgs.include,
+      ...notificationChannelWithRulesArgs,
     });
   },
   updateChannel(id: string, data: { name?: string; isActive?: boolean; config?: Prisma.InputJsonValue; ruleIds?: string[] }) {
@@ -181,7 +211,7 @@ export const notificationsRepository = {
               },
             }),
       },
-      include: notificationChannelWithRulesArgs.include,
+      ...notificationChannelWithRulesArgs,
     });
   },
   deleteChannel(id: string) {
@@ -332,15 +362,14 @@ export const notificationsRepository = {
           },
         ],
       },
-      include: {
-        notificationChannel: true,
-        matchLog: {
-          include: {
-            inboundMessage: {
-              include: {
-                group: true,
-              },
-            },
+      select: {
+        id: true,
+        attempts: true,
+        payload: true,
+        notificationChannel: {
+          select: {
+            type: true,
+            config: true,
           },
         },
       },
@@ -457,8 +486,16 @@ export const notificationsRepository = {
           in: [NotificationDeliveryStatus.PENDING, NotificationDeliveryStatus.RETRY_SCHEDULED],
         },
       },
-      include: {
-        notificationChannel: true,
+      select: {
+        id: true,
+        attempts: true,
+        payload: true,
+        notificationChannel: {
+          select: {
+            type: true,
+            config: true,
+          },
+        },
       },
       orderBy: { createdAt: 'asc' },
     });
@@ -474,8 +511,16 @@ export const notificationsRepository = {
           },
         ],
       },
-      include: {
-        notificationChannel: true,
+      select: {
+        id: true,
+        attempts: true,
+        payload: true,
+        notificationChannel: {
+          select: {
+            type: true,
+            config: true,
+          },
+        },
       },
       orderBy: { createdAt: 'asc' },
       take,

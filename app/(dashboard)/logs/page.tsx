@@ -16,7 +16,7 @@ export default async function LogsPage({
   searchParams: Promise<{ id?: string; search?: string; decision?: string; page?: string }>;
 }) {
   const params = await searchParams;
-  const logs = await listLogs({
+  const logsPromise = listLogs({
     page: params.page ? Number(params.page) : 1,
     pageSize: 50,
     search: params.search,
@@ -29,7 +29,8 @@ export default async function LogsPage({
       | "REJECTED_UNKNOWN_GROUP"
       | undefined,
   });
-  const detail = params.id ? await getLogDetail(params.id) : null;
+  const detailPromise = params.id ? getLogDetail(params.id) : Promise.resolve(null);
+  const [logs, detail] = await Promise.all([logsPromise, detailPromise]);
 
   return (
     <div className="space-y-6">

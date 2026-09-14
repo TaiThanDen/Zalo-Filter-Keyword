@@ -57,7 +57,14 @@ export async function getCurrentUser() {
     return null;
   }
 
-  await authRepository.touchSession(token.tokenHash, new Date());
+  const now = Date.now();
+  const shouldTouchSession =
+    !session.lastSeenAt ||
+    now - session.lastSeenAt.getTime() >= IMPLEMENTATION_DEFAULTS.sessionTouchIntervalMs;
+
+  if (shouldTouchSession) {
+    await authRepository.touchSession(token.tokenHash, new Date(now));
+  }
 
   return toAuthenticatedUser({
     id: session.user.id,

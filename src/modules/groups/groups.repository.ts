@@ -171,11 +171,31 @@ export const groupsRepository = {
             }
           : {}),
       },
-      include: {
-        watcher: true,
+      select: {
+        id: true,
+        source: true,
+        externalId: true,
+        name: true,
+        isEnabled: true,
+        watcherId: true,
+        createdAt: true,
+        updatedAt: true,
+        watcher: {
+          select: {
+            id: true,
+            name: true,
+          },
+        },
         groupRules: {
-          include: {
-            rule: true,
+          select: {
+            ruleId: true,
+            rule: {
+              select: {
+                id: true,
+                type: true,
+                pattern: true,
+              },
+            },
           },
         },
       },

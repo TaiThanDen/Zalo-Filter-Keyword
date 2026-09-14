@@ -10,7 +10,18 @@ export const authRepository = {
   findSessionByTokenHash(tokenHash: string) {
     return db.session.findUnique({
       where: { tokenHash },
-      include: { user: true },
+      select: {
+        expiresAt: true,
+        lastSeenAt: true,
+        user: {
+          select: {
+            id: true,
+            email: true,
+            role: true,
+            isActive: true,
+          },
+        },
+      },
     });
   },
   createSession(userId: string, tokenHash: string, expiresAt: Date) {

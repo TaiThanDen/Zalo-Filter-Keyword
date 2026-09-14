@@ -47,9 +47,34 @@ export function deriveWatcherStatus(lastHeartbeatAt: Date | null) {
 
 export async function listWatchers() {
   const watchers = await db.watcher.findMany({
-    include: {
-      groups: true,
-      runtimeConfig: true,
+    select: {
+      id: true,
+      name: true,
+      reportedStatus: true,
+      lastHeartbeatAt: true,
+      lastSeenIp: true,
+      lastVersion: true,
+      createdAt: true,
+      updatedAt: true,
+      runtimeConfig: {
+        select: {
+          sleepEnabled: true,
+          controlMode: true,
+          sleepStartMinute: true,
+          sleepEndMinute: true,
+          sleepWindows: true,
+          sleepTimezone: true,
+        },
+      },
+      groups: {
+        select: {
+          id: true,
+          name: true,
+          externalId: true,
+          source: true,
+          isEnabled: true,
+        },
+      },
     },
     orderBy: { name: "asc" },
   });
@@ -130,42 +155,80 @@ export async function syncWatcherGroups(
 }
 
 export async function getWatcherConfig(watcherId: string) {
-  const watcher = await db.watcher.findUnique({
-    where: { id: watcherId },
-    include: { runtimeConfig: true },
-  });
+  const [watcher, groups, channels] = await Promise.all([
+    db.watcher.findUnique({
+      where: { id: watcherId },
+      select: {
+        id: true,
+        name: true,
+        runtimeConfig: {
+          select: {
+            sleepEnabled: true,
+            controlMode: true,
+            sleepStartMinute: true,
+            sleepEndMinute: true,
+            sleepWindows: true,
+            sleepTimezone: true,
+          },
+        },
+      },
+    }),
+    db.group.findMany({
+      where: {
+        isEnabled: true,
+        OR: [{ watcherId }, { watcherId: null }],
+      },
+      select: {
+        id: true,
+        source: true,
+        externalId: true,
+        name: true,
+        isEnabled: true,
+        groupRules: {
+          where: {
+            rule: {
+              isActive: true,
+            },
+          },
+          select: {
+            rule: {
+              select: {
+                id: true,
+                type: true,
+                pattern: true,
+                matchType: true,
+                caseSensitive: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: { name: "asc" },
+    }),
+    db.notificationChannel.findMany({
+      where: { isActive: true, type: ChannelType.TELEGRAM },
+      select: {
+        id: true,
+        type: true,
+        isActive: true,
+      },
+      orderBy: { name: "asc" },
+    }),
+  ]);
 
   if (!watcher) {
     throw new AppError("WATCHER_NOT_FOUND", "Watcher not found", 404);
   }
 
-  const groups = await db.group.findMany({
-    where: {
-      isEnabled: true,
-      OR: [{ watcherId }, { watcherId: null }],
-    },
-    include: {
-      groupRules: {
-        include: { rule: true },
-      },
-    },
-    orderBy: { name: "asc" },
-  });
+  const rulesById = new Map<string, typeof groups[number]["groupRules"][number]["rule"]>();
 
-  const rules = groups
-    .flatMap((group) => group.groupRules.map((groupRule) => groupRule.rule))
-    .filter((rule) => rule.isActive)
-    .reduce<typeof groups[number]["groupRules"][number]["rule"][]>((accumulator, rule) => {
-      if (!accumulator.some((item) => item.id === rule.id)) {
-        accumulator.push(rule);
-      }
-      return accumulator;
-    }, []);
+  for (const group of groups) {
+    for (const groupRule of group.groupRules) {
+      rulesById.set(groupRule.rule.id, groupRule.rule);
+    }
+  }
 
-  const channels = await db.notificationChannel.findMany({
-    where: { isActive: true, type: ChannelType.TELEGRAM },
-    orderBy: { name: "asc" },
-  });
+  const rules = Array.from(rulesById.values());
 
   return {
     watcher: {

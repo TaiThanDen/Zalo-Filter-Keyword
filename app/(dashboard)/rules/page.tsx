@@ -101,7 +101,7 @@ export default async function RulesPage() {
                     <td data-label="Kiểu match">{rule.matchType === "CONTAINS" ? "Contains" : "Whole word"}</td>
                     <td data-label="Cờ">{rule.caseSensitive ? "Phân biệt hoa thường" : "Không phân biệt hoa thường"}</td>
                     <td data-label="Ghi chú">{rule.note ?? "-"}</td>
-                    <td data-label="Số nhóm gắn">{rule.groupRules.length}</td>
+                    <td data-label="Số nhóm gắn">{rule._count.groupRules}</td>
                     <td data-label="Thao tác">
                       <JsonActionForm
                         endpoint={`/api/rules/${rule.id}`}

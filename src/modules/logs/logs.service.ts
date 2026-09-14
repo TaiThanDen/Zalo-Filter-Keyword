@@ -4,6 +4,14 @@ import { db } from "@/src/lib/db";
 import { AppError } from "@/src/lib/errors";
 import { summarizeNotificationStatus } from "@/src/modules/notifications/notifications.service";
 
+const dashboardStatsCacheTtlMs = 10_000;
+let dashboardStatsCache:
+  | {
+      expiresAt: number;
+      value: Awaited<ReturnType<typeof loadDashboardStats>>;
+    }
+  | null = null;
+
 export async function listLogs(input: {
   groupId?: string;
   decision?:
@@ -64,13 +72,33 @@ export async function listLogs(input: {
   const [items, total] = await Promise.all([
     db.matchLog.findMany({
       where,
-      include: {
+      select: {
+        id: true,
+        inboundMessageId: true,
+        decision: true,
+        matchedIncludeRules: true,
+        matchedExcludeRules: true,
+        reason: true,
         inboundMessage: {
-          include: {
-            group: true,
+          select: {
+            groupName: true,
+            groupExternalId: true,
+            senderName: true,
+            senderExternalId: true,
+            messageText: true,
+            messageTime: true,
+            group: {
+              select: {
+                name: true,
+              },
+            },
           },
         },
-        notificationDeliveries: true,
+        notificationDeliveries: {
+          select: {
+            status: true,
+          },
+        },
       },
       orderBy: { processedAt: "desc" },
       skip: pagination.skip,
@@ -96,9 +124,7 @@ export async function listLogs(input: {
       matchedExcludeRules:
         (item.matchedExcludeRules as Array<{ pattern: string }> | null)?.map((rule) => rule.pattern) ?? [],
       messageTime: item.inboundMessage.messageTime.toISOString(),
-      notificationStatus: summarizeNotificationStatus(
-        item.notificationDeliveries.map((delivery) => delivery.status),
-      ),
+      notificationStatus: summarizeNotificationStatus(item.notificationDeliveries.map((delivery) => delivery.status)),
     })),
     pagination: {
       page: pagination.page,
@@ -134,6 +160,22 @@ export async function getLogDetail(id: string) {
 }
 
 export async function getDashboardStats() {
+  const now = Date.now();
+
+  if (dashboardStatsCache && dashboardStatsCache.expiresAt > now) {
+    return dashboardStatsCache.value;
+  }
+
+  const value = await loadDashboardStats();
+  dashboardStatsCache = {
+    expiresAt: now + dashboardStatsCacheTtlMs,
+    value,
+  };
+
+  return value;
+}
+
+async function loadDashboardStats() {
   const [
     totalGroups,
     enabledGroups,
@@ -164,7 +206,12 @@ export async function getDashboardStats() {
     }),
     db.notificationDelivery.count({ where: { status: "FAILED" } }),
     db.notificationOutbox.count({ where: { status: "FAILED" } }),
-    db.watcher.findMany(),
+    db.watcher.findMany({
+      select: {
+        lastHeartbeatAt: true,
+        reportedStatus: true,
+      },
+    }),
   ]);
 
   return {

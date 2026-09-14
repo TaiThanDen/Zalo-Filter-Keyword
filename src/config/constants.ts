@@ -15,6 +15,7 @@ export const IMPLEMENTATION_DEFAULTS = {
   messageDedupeTtlMs: 24 * 60 * 60 * 1000,
   notificationOutboxTtlMs: 3 * 24 * 60 * 60 * 1000,
   sessionTtlMs: 1000 * 60 * 60 * 24 * 7,
+  sessionTouchIntervalMs: 5 * 60 * 1000,
   watcherStatusThresholdsMs: {
     online: 60_000,
     degraded: 120_000,

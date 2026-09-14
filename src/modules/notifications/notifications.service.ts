@@ -156,12 +156,8 @@ export async function queueMatchedRuleNotifications(
   dedupeInput: DirectNotificationDedupeInput,
 ) {
   const matchedRuleIdSet = new Set(matchedRuleIds);
-  const channels = await notificationsRepository.listChannels();
+  const channels = await notificationsRepository.listActiveDeliveryChannels();
   const matchingChannels = channels.filter((channel) => {
-    if (!channel.isActive) {
-      return false;
-    }
-
     if (channel.notificationChannelRules.length === 0) {
       return true;
     }

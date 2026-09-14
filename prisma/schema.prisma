@@ -62,13 +62,13 @@ model User {
 }
 
 model Session {
-  id         String   @id @default(cuid())
+  id         String    @id @default(cuid())
   userId     String
-  tokenHash  String   @unique
+  tokenHash  String    @unique
   expiresAt  DateTime
   lastSeenAt DateTime?
-  createdAt  DateTime @default(now())
-  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt  DateTime  @default(now())
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
 }
@@ -116,6 +116,8 @@ model Group {
 
   @@unique([source, externalId])
   @@index([isEnabled])
+  @@index([updatedAt])
+  @@index([watcherId, isEnabled, name])
 }
 
 model Rule {
@@ -143,15 +145,16 @@ model GroupRule {
   createdAt DateTime @default(now())
 
   @@unique([groupId, ruleId])
+  @@index([ruleId])
 }
 
 model InboundMessage {
-  id                String      @id @default(cuid())
-  source            String      @default("zalo")
+  id                String    @id @default(cuid())
+  source            String    @default("zalo")
   watcherId         String?
-  watcher           Watcher?    @relation(fields: [watcherId], references: [id], onDelete: SetNull)
+  watcher           Watcher?  @relation(fields: [watcherId], references: [id], onDelete: SetNull)
   groupId           String?
-  group             Group?      @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  group             Group?    @relation(fields: [groupId], references: [id], onDelete: SetNull)
   groupExternalId   String
   groupName         String?
   messageExternalId String?
@@ -162,27 +165,28 @@ model InboundMessage {
   messageTime       DateTime
   fingerprint       String
   rawPayload        Json?
-  createdAt         DateTime    @default(now())
+  createdAt         DateTime  @default(now())
   matchLog          MatchLog?
 
+  @@unique([source, groupExternalId, messageExternalId])
   @@index([groupExternalId, messageTime])
   @@index([fingerprint])
   @@index([messageExternalId])
-  @@unique([source, groupExternalId, messageExternalId])
 }
 
 model MatchLog {
-  id                     String                  @id @default(cuid())
-  inboundMessageId       String                  @unique
+  id                     String                 @id @default(cuid())
+  inboundMessageId       String                 @unique
   decision               MatchDecision
   matchedIncludeRules    Json?
   matchedExcludeRules    Json?
   reason                 String?
-  processedAt            DateTime                @default(now())
-  inboundMessage         InboundMessage          @relation(fields: [inboundMessageId], references: [id], onDelete: Cascade)
+  processedAt            DateTime               @default(now())
+  inboundMessage         InboundMessage         @relation(fields: [inboundMessageId], references: [id], onDelete: Cascade)
   notificationDeliveries NotificationDelivery[]
 
   @@index([decision, processedAt])
+  @@index([processedAt])
 }
 
 model NotificationChannel {
@@ -196,6 +200,8 @@ model NotificationChannel {
   notificationOutboxes     NotificationOutbox[]
   createdAt                DateTime                  @default(now())
   updatedAt                DateTime                  @updatedAt
+
+  @@index([isActive, type])
 }
 
 model NotificationChannelRule {
@@ -225,9 +231,11 @@ model NotificationDelivery {
   matchLog              MatchLog                   @relation(fields: [matchLogId], references: [id], onDelete: Cascade)
   notificationChannel   NotificationChannel        @relation(fields: [notificationChannelId], references: [id], onDelete: Cascade)
 
-  @@index([status, nextRetryAt])
-  @@index([notificationChannelId, status])
   @@unique([matchLogId, notificationChannelId])
+  @@index([status, nextRetryAt])
+  @@index([status, createdAt])
+  @@index([status, nextRetryAt, createdAt])
+  @@index([notificationChannelId, status])
 }
 
 model MessageDedupe {
@@ -261,6 +269,9 @@ model NotificationOutbox {
   notificationChannel   NotificationChannel        @relation(fields: [notificationChannelId], references: [id], onDelete: Cascade)
 
   @@index([status, nextRetryAt])
+  @@index([createdAt])
+  @@index([status, createdAt])
+  @@index([status, nextRetryAt, createdAt])
   @@index([notificationChannelId, status])
   @@index([expiresAt])
 }

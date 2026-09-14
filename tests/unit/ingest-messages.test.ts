@@ -111,54 +111,34 @@ test("ingest auto-creates unknown group, evaluates first message, and queues lig
     }),
   );
   restore.push(
-    stubMethod(notificationsRepository, "listChannels", async () => [
+    stubMethod(notificationsRepository, "listActiveDeliveryChannels", async () => [
       {
         id: "channel-all",
         type: "TELEGRAM",
-        name: "Telegram all",
-        isActive: true,
         config: { botToken: "token", chatId: "-1001", parseMode: "HTML" },
-        createdAt: new Date("2026-04-12T00:00:00.000Z"),
-        updatedAt: new Date("2026-04-12T00:00:00.000Z"),
         notificationChannelRules: [],
       },
       {
         id: "channel-pb",
         type: "TELEGRAM",
-        name: "Telegram PB",
-        isActive: true,
         config: { botToken: "token-2", chatId: "-1002", parseMode: "HTML" },
-        createdAt: new Date("2026-04-12T00:00:00.000Z"),
-        updatedAt: new Date("2026-04-12T00:00:00.000Z"),
         notificationChannelRules: [
           {
-            id: "channel-rule-1",
-            notificationChannelId: "channel-pb",
             ruleId: "rule-PB",
-            createdAt: new Date("2026-04-12T00:00:00.000Z"),
-            rule: createIncludeRule("PB"),
           },
         ],
       },
       {
         id: "channel-pg",
         type: "TELEGRAM",
-        name: "Telegram PG",
-        isActive: true,
         config: { botToken: "token-3", chatId: "-1003", parseMode: "HTML" },
-        createdAt: new Date("2026-04-12T00:00:00.000Z"),
-        updatedAt: new Date("2026-04-12T00:00:00.000Z"),
         notificationChannelRules: [
           {
-            id: "channel-rule-2",
-            notificationChannelId: "channel-pg",
             ruleId: "rule-PG",
-            createdAt: new Date("2026-04-12T00:00:00.000Z"),
-            rule: createIncludeRule("PG"),
           },
         ],
       },
-    ] as Awaited<ReturnType<typeof notificationsRepository.listChannels>>),
+    ] as Awaited<ReturnType<typeof notificationsRepository.listActiveDeliveryChannels>>),
   );
   restore.push(
     stubMethod(notificationsRepository, "createOutboxItems", async (items: typeof outboxItems) => {

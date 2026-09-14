@@ -1,15 +1,24 @@
+import Link from "next/link";
 import { listWatchers } from "@/src/modules/watchers/watchers.service";
 import { listRules } from "@/src/modules/rules/rules.service";
 import { listGroups } from "@/src/modules/groups/groups.service";
 import { StatusBadge } from "@/src/components/ui/status-badge";
 import { JsonActionForm } from "@/src/components/forms/json-action-form";
 
-export default async function GroupsPage() {
+export default async function GroupsPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ page?: string }>;
+}) {
+  const params = await searchParams;
+  const currentPage = params.page ? Number(params.page) : 1;
+  const pageSize = 50;
   const [groupsData, rules, watchers] = await Promise.all([
-    listGroups({ page: 1, pageSize: 100 }),
+    listGroups({ page: currentPage, pageSize }),
     listRules({}),
     listWatchers(),
   ]);
+  const totalPages = Math.max(1, Math.ceil(groupsData.pagination.total / groupsData.pagination.pageSize));
 
   return (
     <div className="space-y-8">
@@ -179,6 +188,27 @@ export default async function GroupsPage() {
             </tbody>
           </table>
         </div>
+        {totalPages > 1 ? (
+          <div className="mt-4 flex flex-col gap-3 border-t border-[var(--color-border)] pt-4 text-sm text-[var(--color-muted)] sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              Trang {groupsData.pagination.page}/{totalPages} - {groupsData.pagination.total} nhóm
+            </div>
+            <div className="flex gap-2">
+              <Link
+                className={`btn btn-secondary ${groupsData.pagination.page <= 1 ? "pointer-events-none opacity-50" : ""}`}
+                href={`/groups?page=${Math.max(1, groupsData.pagination.page - 1)}`}
+              >
+                Trước
+              </Link>
+              <Link
+                className={`btn btn-secondary ${groupsData.pagination.page >= totalPages ? "pointer-events-none opacity-50" : ""}`}
+                href={`/groups?page=${Math.min(totalPages, groupsData.pagination.page + 1)}`}
+              >
+                Sau
+              </Link>
+            </div>
+          </div>
+        ) : null}
       </section>
     </div>
   );

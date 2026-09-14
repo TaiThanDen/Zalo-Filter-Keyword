@@ -15,8 +15,21 @@ export const rulesRepository = {
             }
           : {}),
       },
-      include: {
-        groupRules: true,
+      select: {
+        id: true,
+        type: true,
+        pattern: true,
+        matchType: true,
+        caseSensitive: true,
+        isActive: true,
+        note: true,
+        createdAt: true,
+        updatedAt: true,
+        _count: {
+          select: {
+            groupRules: true,
+          },
+        },
       },
       orderBy: [{ type: "asc" }, { updatedAt: "desc" }],
     });
