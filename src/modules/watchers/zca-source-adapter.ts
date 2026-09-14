@@ -54,6 +54,14 @@ function normalizeText(value: unknown) {
   return normalized || null;
 }
 
+export function toStoredZaloGroupId(zcaGroupId: string) {
+  return /^\d+$/.test(zcaGroupId) ? `g${zcaGroupId}` : zcaGroupId;
+}
+
+function toZcaGroupId(storedGroupId: string) {
+  return /^g\d+$/.test(storedGroupId) ? storedGroupId.slice(1) : storedGroupId;
+}
+
 export function extractZcaMessageText(content: unknown, notify?: string) {
   const plainText = normalizeText(content);
   if (plainText) {
@@ -99,12 +107,13 @@ export function mapZcaGroupMessage(
   }
 
   const messageId = message.data.msgId ?? message.data.cliMsgId ?? message.data.actionId;
+  const groupExternalId = toStoredZaloGroupId(message.threadId);
 
   return {
     source: "zalo",
-    groupExternalId: message.threadId,
+    groupExternalId,
     groupName,
-    messageExternalId: messageId ? `${message.threadId}:${messageId}` : undefined,
+    messageExternalId: messageId ? `${groupExternalId}:${messageId}` : undefined,
     senderExternalId: message.data.uidFrom,
     senderName: normalizeText(message.data.dName) ?? undefined,
     messageText,
@@ -191,7 +200,7 @@ export class ZcaSourceAdapter implements SourceAdapter {
 
   async seedKnownGroups(groups: DiscoveredSourceGroup[]) {
     for (const group of groups) {
-      this.groupNames.set(group.externalId, group.name);
+      this.groupNames.set(toZcaGroupId(group.externalId), group.name);
     }
   }
 
@@ -237,7 +246,7 @@ export class ZcaSourceAdapter implements SourceAdapter {
   private cachedGroups() {
     return Array.from(this.groupNames, ([externalId, name]) => ({
       source: "zalo" as const,
-      externalId,
+      externalId: toStoredZaloGroupId(externalId),
       name,
     })).sort((left, right) => left.name.localeCompare(right.name, "vi"));
   }

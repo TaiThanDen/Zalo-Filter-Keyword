@@ -5,12 +5,13 @@ import {
   extractZcaMessageText,
   mapZcaGroupMessage,
   resolveZcaMessageTime,
+  toStoredZaloGroupId,
 } from "@/src/modules/watchers/zca-source-adapter";
 
 function createMessage(overrides: Record<string, unknown> = {}) {
   return {
     type: ThreadType.Group,
-    threadId: "group-123",
+    threadId: "1570549445668107973",
     isSelf: false,
     data: {
       actionId: "action-1",
@@ -33,9 +34,9 @@ test("maps an incoming Zalo group message to the existing watcher contract", () 
 
   assert.deepEqual(payload, {
     source: "zalo",
-    groupExternalId: "group-123",
+    groupExternalId: "g1570549445668107973",
     groupName: "Nhóm tuyển dụng",
-    messageExternalId: "group-123:message-1",
+    messageExternalId: "g1570549445668107973:message-1",
     senderExternalId: "user-456",
     senderName: "Nguyễn Văn A",
     messageText: "Cần tuyển PB ca tối",
@@ -49,6 +50,12 @@ test("maps an incoming Zalo group message to the existing watcher contract", () 
       status: 1,
     },
   });
+});
+
+test("keeps compatibility with Playwright-era stored group IDs", () => {
+  assert.equal(toStoredZaloGroupId("1570549445668107973"), "g1570549445668107973");
+  assert.equal(toStoredZaloGroupId("g1570549445668107973"), "g1570549445668107973");
+  assert.equal(toStoredZaloGroupId("custom-group-id"), "custom-group-id");
 });
 
 test("ignores direct messages and messages sent by the logged-in account", () => {
