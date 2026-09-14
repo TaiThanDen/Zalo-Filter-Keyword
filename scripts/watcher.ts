@@ -355,8 +355,10 @@ async function main() {
   await adapter.seedKnownGroups?.(seedableGroups);
   await adapter.seedRules?.(seedableRules);
   await adapter.setPaused?.(sleeping);
-  logger.info("watcher_config_loaded", config);
-  logger.info("watcher_config_seeded", { groups: seedableGroups.length, rules: seedableRules.length });
+  logger.info("watcher_config_loaded", {
+    groups: seedableGroups.length,
+    rules: seedableRules.length,
+  });
   logger.info("watcher_sleep_schedule_loaded", {
     ...runtimeControl,
     sleeping,

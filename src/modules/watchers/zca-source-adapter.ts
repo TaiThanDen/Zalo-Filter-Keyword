@@ -307,9 +307,16 @@ export class ZcaSourceAdapter implements SourceAdapter {
     let capturedCredentials: Credentials | null = null;
     const api = await zalo.loginQR({ qrPath: env.WATCHER_ZCA_QR_FILE }, (event) => {
       if (event.type === LoginQRCallbackEventType.QRCodeGenerated) {
-        void event.actions.saveToFile(env.WATCHER_ZCA_QR_FILE).then(() => {
-          logger.warn("watcher_zca_qr_ready", { qrFile: env.WATCHER_ZCA_QR_FILE });
-        });
+        void event.actions.saveToFile(env.WATCHER_ZCA_QR_FILE)
+          .then(() => chmod(env.WATCHER_ZCA_QR_FILE, 0o600))
+          .then(() => {
+            logger.warn("watcher_zca_qr_ready", { qrFile: env.WATCHER_ZCA_QR_FILE });
+          })
+          .catch((error) => {
+            logger.error("watcher_zca_qr_write_failed", {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          });
         return;
       }
 
